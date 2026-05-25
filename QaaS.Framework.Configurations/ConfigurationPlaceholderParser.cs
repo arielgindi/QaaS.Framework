@@ -46,7 +46,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// One-time O(N) cache/index population; later writes and copies update those structures incrementally.
+    /// Clears any previous cached view of the configuration and reads it again from the current configuration.
+    /// Later writes and copies update the cache without reading the whole configuration again.
     /// </summary>
     private void RebuildEntryCacheAndIndexes()
     {
@@ -62,6 +63,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         }
     }
 
+    /// <summary>
+    /// Keeps running placeholder passes until a full pass makes no changes.
+    /// </summary>
     private void ResolvePlaceholderPathsUntilStable()
     {
         int modificationCountAtPassStart;
@@ -72,6 +76,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         } while (_modificationCount != modificationCountAtPassStart);
     }
 
+    /// <summary>
+    /// Resolves the paths that currently contain placeholders. The list is copied first because resolving one path can
+    /// add, remove, or fully resolve other paths.
+    /// </summary>
     private void ResolveCurrentPlaceholderPathSnapshot()
     {
         // ResolvePlaceholderValue can mutate _placeholderPaths mid-iteration.
@@ -85,9 +93,15 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         }
     }
 
+    /// <summary>
+    /// Checks whether the current cached value at this path still looks like it has a placeholder.
+    /// </summary>
     private bool PathValueContainsPlaceholder(string path) =>
         TryGetValueAtPath(path, out var value) && ValueContainsPlaceholder(value);
 
+    /// <summary>
+    /// Checks only for the placeholder opening token. Full placeholder parsing happens later.
+    /// </summary>
     private static bool ValueContainsPlaceholder(string? value) =>
         value?.Contains(PlaceholderStart, StringComparison.Ordinal) == true;
 
@@ -140,6 +154,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return GetEntryAtPath(path);
     }
 
+    /// <summary>
+    /// Uses the default value for a missing reference, then resolves the same path again because the default may contain
+    /// another placeholder.
+    /// </summary>
     private bool ApplyDefaultAndResolve(string path, string valueAtPath, ParsedPlaceholder placeholder)
     {
         var valueWithDefaultApplied = SpliceReplacementIntoValue(
@@ -151,6 +169,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return ResolvePlaceholderValue(path) is not null;
     }
 
+    /// <summary>
+    /// Resolves the path referenced by the placeholder before using its value, while tracking active paths to catch loops.
+    /// </summary>
     private CachedConfigurationEntry? ResolveReferencedPath(string path, ParsedPlaceholder placeholder)
     {
         if (!_activeResolutionPaths.Add(placeholder.ReferencedPath))
@@ -166,6 +187,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         }
     }
 
+    /// <summary>
+    /// Copies an object-shaped reference into the destination path. This is allowed only when the placeholder is the
+    /// whole destination value.
+    /// </summary>
     private void CopyObjectReference(string destinationPath, string valueAtDestinationPath, ParsedPlaceholder placeholder)
     {
         // Object references are only legal when ${X} is the whole value; they cannot be spliced into a string.
@@ -177,6 +202,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         CopySubtreeByPath(placeholder.ReferencedPath, destinationPath);
     }
 
+    /// <summary>
+    /// Replaces one scalar placeholder inside the current value and writes the resolved value back to the cache.
+    /// </summary>
     private void ReplaceScalarPlaceholder(
         string path,
         string valueAtPath,
@@ -187,6 +215,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         WriteValueAt(path, resolvedValue);
     }
 
+    /// <summary>
+    /// Creates an error that points to the path being resolved and the reference that closed the loop.
+    /// </summary>
     private static InvalidOperationException CreateCircularReferenceException(string path, string referencedPath) =>
         new(
             $"Configuration placeholder loop found: '{path}' refers back to '{referencedPath}'. " +
@@ -198,18 +229,33 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private bool IsScalarEntry(CachedConfigurationEntry entry) =>
         entry.Value != null && !HasDescendants(entry.Path);
 
+    /// <summary>
+    /// True when the path itself has a value. It may still have children from lower-priority configuration providers.
+    /// </summary>
     private static bool HasDirectValue(CachedConfigurationEntry entry) =>
         entry.Value != null;
 
+    /// <summary>
+    /// True when another cached path exists below this path.
+    /// </summary>
     private bool HasDescendants(string path) =>
         _descendantCountByParentPath.ContainsKey(path);
 
+    /// <summary>
+    /// Returns a cached entry if the path still exists; otherwise returns null.
+    /// </summary>
     private CachedConfigurationEntry? GetEntryAtPath(string path) =>
         TryGetEntryAtPath(path, out var entry) ? entry : null;
 
+    /// <summary>
+    /// Checks whether the path exists in the cached configuration view.
+    /// </summary>
     private bool PathExists(string path) =>
         _entriesByPath.ContainsKey(path);
 
+    /// <summary>
+    /// Reads one cached path as a small entry object with both path and value.
+    /// </summary>
     private bool TryGetEntryAtPath(string path, out CachedConfigurationEntry entry)
     {
         if (_entriesByPath.TryGetValue(path, out var value))
@@ -222,6 +268,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return false;
     }
 
+    /// <summary>
+    /// Reads only the cached value for a path when the caller does not need the path wrapped with it.
+    /// </summary>
     private bool TryGetValueAtPath(string path, out string? value) =>
         _entriesByPath.TryGetValue(path, out value);
 
@@ -244,6 +293,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _modificationCount++;
     }
 
+    /// <summary>
+    /// Finds the destination entries that must be removed before copying. Leaf destinations are handled without scanning
+    /// the whole configuration.
+    /// </summary>
     private List<CachedConfigurationEntry> GetDestinationEntriesToRemove(string destinationPath)
     {
         if (HasDescendants(destinationPath))
@@ -259,6 +312,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             : [];
     }
 
+    /// <summary>
+    /// Gets all cached entries under a source path. Repeated copies from the same source reuse this list.
+    /// </summary>
     private List<CachedConfigurationEntry> GetSourceSubtreeEntries(string sourcePath)
     {
         if (_sourceSubtreesByPath.TryGetValue(sourcePath, out var cachedEntries))
@@ -272,6 +328,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return sourceEntries;
     }
 
+    /// <summary>
+    /// Drops cached source subtrees that might include, or be included by, the path that just changed.
+    /// </summary>
     private void InvalidateSourceSubtreeCache(string changedPath)
     {
         var staleSourcePaths = _sourceSubtreesByPath.Keys
@@ -282,12 +341,21 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             _sourceSubtreesByPath.Remove(cachedSourcePath);
     }
 
+    /// <summary>
+    /// True when a cached source subtree and a changed path touch the same branch of the configuration tree.
+    /// </summary>
     private static bool SourceSubtreeCacheOverlapsChange(string sourcePath, string changedPath) =>
         IsPathOrDescendant(changedPath, sourcePath) || IsPathOrDescendant(sourcePath, changedPath);
 
+    /// <summary>
+    /// Builds the public IConfiguration once after all cached placeholder changes are done.
+    /// </summary>
     private void RebuildConfigurationFromEntries() =>
         _configuration = new ConfigurationBuilder().AddInMemoryCollection(_entriesByPath).Build();
 
+    /// <summary>
+    /// Adds or replaces one cached path and keeps the parent/placeholder indexes in sync.
+    /// </summary>
     private void SetEntry(string path, string? value)
     {
         if (_entriesByPath.TryAdd(path, value))
@@ -302,6 +370,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         RefreshPlaceholderMembership(path, value);
     }
 
+    /// <summary>
+    /// Removes one cached path and keeps the parent/placeholder indexes in sync.
+    /// </summary>
     private void RemoveEntry(string path)
     {
         if (_entriesByPath.Remove(path))
@@ -309,6 +380,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _placeholderPaths.Remove(path);
     }
 
+    /// <summary>
+    /// Keeps the placeholder path list accurate after a value changes.
+    /// </summary>
     private void RefreshPlaceholderMembership(string path, string? value)
     {
         if (ValueContainsPlaceholder(value))
@@ -375,13 +449,22 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private static bool IsPlaceholderEmbeddedInString(string sectionValue, ParsedPlaceholder placeholder) =>
         placeholder.StartIndex != 0 || placeholder.EndIndex != sectionValue.Length - 1;
 
+    /// <summary>
+    /// True when the candidate is exactly the path or one of its descendants.
+    /// </summary>
     private static bool IsPathOrDescendant(string candidatePath, string path) =>
         candidatePath.StartsWith(path, StringComparison.OrdinalIgnoreCase) &&
         (candidatePath.Length == path.Length || candidatePath[path.Length] == PathSeparatorChar);
 
+    /// <summary>
+    /// Rewrites a copied source path so it lives under the destination path.
+    /// </summary>
     private static string RebasePathPrefix(string path, string sourcePath, string destinationPath) =>
         path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
 
+    /// <summary>
+    /// Creates one copied entry with the source prefix replaced by the destination prefix.
+    /// </summary>
     private static CachedConfigurationEntry RebaseEntry(
         CachedConfigurationEntry entry,
         string sourcePath,
@@ -404,12 +487,18 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return -1;
     }
 
+    /// <summary>
+    /// The parsed pieces of one placeholder found inside a string value.
+    /// </summary>
     private readonly record struct ParsedPlaceholder(
         int StartIndex,
         int EndIndex,
         string ReferencedPath,
         string? DefaultValue);
 
+    /// <summary>
+    /// A lightweight cached view of one flattened configuration path and its value.
+    /// </summary>
     private readonly record struct CachedConfigurationEntry(
         string Path,
         string? Value);
