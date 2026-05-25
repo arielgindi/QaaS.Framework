@@ -13,7 +13,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private const char OpenCurlyBracket = '{';
     private const char CloseCurlyBracket = '}';
 
-    private readonly HashSet<string> _resolutionStack = new();
+    private readonly HashSet<string> _resolutionStack = [];
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
@@ -60,7 +60,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private void SetValue(string path, string? value)
     {
         configuration[path] = value;
-        UpdatePlaceholderPath(path, value);
+        RefreshPlaceholderMembership(path, value);
         _modificationCount++;
     }
 
@@ -72,7 +72,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private IConfigurationSection ResolvePlaceholderValue(string path)
     {
         var currentSection = GetObjectFromConfiguration(path);
-        if (currentSection is null || !IsConfigurationSectionString(currentSection)) return currentSection!;
+        if (currentSection is null || !IsStringLeaf(currentSection)) return currentSection!;
         var lastEnd = 0;
 
         while (currentSection.Value is not null)
@@ -87,14 +87,14 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             // Finds the placeholder value path and default value.
             var placeholder = sectionValue!.Substring(placeholderStartIndex + 2, end - placeholderStartIndex - 2);
             var placeholderParts = placeholder.Split(NullSeparator, 2);
-            var placeholderValuePath = placeholderParts[0].Trim();
+            var referencedPath = placeholderParts[0].Trim();
             var defaultValue = placeholderParts.Length > 1 ? placeholderParts[1].Trim() : null;
 
-            if (_resolutionStack.Contains(placeholderValuePath))
+            if (_resolutionStack.Contains(referencedPath))
                 throw new InvalidOperationException("Circular placeholder reference detected in configuration at: " +
                                                     path);
 
-            var placeholderResolvedConfigurationObject = GetObjectFromConfiguration(placeholderValuePath);
+            var placeholderResolvedConfigurationObject = GetObjectFromConfiguration(referencedPath);
             if (placeholderResolvedConfigurationObject == null && defaultValue == null) break;
 
             // If placeholder was not found but there is a default value, sets the default value to be the placeholder value and call the function again.
@@ -109,21 +109,21 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             {
                 // try/finally so an exception during recursion or substring-validation does not leave
                 // a stale entry in _resolutionStack and make a later valid resolve look falsely circular.
-                _resolutionStack.Add(placeholderValuePath);
+                _resolutionStack.Add(referencedPath);
                 try
                 {
-                    var resolvedSection = ResolvePlaceholderValue(placeholderValuePath);
+                    var resolvedSection = ResolvePlaceholderValue(referencedPath);
                     var hasLeadingTrailingCharsFromPlaceholder = !(sectionValue.StartsWith(Prefix) &&
                                                                    sectionValue.EndsWith(Suffix) && sectionValue.Skip(end)
                                                                        .Any(chr => chr == CloseCurlyBracket));
 
-                    if (!IsConfigurationSectionString(resolvedSection) && hasLeadingTrailingCharsFromPlaceholder)
+                    if (!IsStringLeaf(resolvedSection) && hasLeadingTrailingCharsFromPlaceholder)
                         throw new InvalidOperationException(
                             "Placeholder reference to an object but is a substring value at: " + path);
 
-                    if (!IsConfigurationSectionString(resolvedSection))
+                    if (!IsStringLeaf(resolvedSection))
                     {
-                        CopyConfigurationsByPath(placeholderValuePath, path);
+                        CopyConfigurationsByPath(referencedPath, path);
                         currentSection = resolvedSection;
                         break;
                     }
@@ -133,11 +133,11 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
                                    sectionValue.Substring(end + 1);
                     currentSection.Value = sectionValue;
                     SetValue(path, sectionValue);
-                    lastEnd = placeholderStartIndex + resolvedSection.Value!.Length; // Section is tested not to be null at IsConfigurationSectionString
+                    lastEnd = placeholderStartIndex + resolvedSection.Value!.Length; // Section is tested not to be null at IsStringLeaf
                 }
                 finally
                 {
-                    _resolutionStack.Remove(placeholderValuePath);
+                    _resolutionStack.Remove(referencedPath);
                 }
             }
 
@@ -148,7 +148,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     // A section is a "string leaf" when it has a value AND no descendants — i.e. its path
     // is not an ancestor of any other key, tracked in _parentPathRefcounts.
-    private bool IsConfigurationSectionString(IConfigurationSection section)
+    private bool IsStringLeaf(IConfigurationSection section)
     {
         return section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
     }
@@ -190,7 +190,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     {
         if (_existingPaths.Add(path))
             IncrementParentRefcount(path);
-        UpdatePlaceholderPath(path, value);
+        RefreshPlaceholderMembership(path, value);
     }
 
     private void RemovePathFromIndex(string path)
@@ -200,7 +200,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _pathsContainingPlaceholders.Remove(path);
     }
 
-    private void UpdatePlaceholderPath(string path, string? value)
+    private void RefreshPlaceholderMembership(string path, string? value)
     {
         if (value is not null && value.Contains(Prefix, StringComparison.Ordinal))
             _pathsContainingPlaceholders.Add(path);

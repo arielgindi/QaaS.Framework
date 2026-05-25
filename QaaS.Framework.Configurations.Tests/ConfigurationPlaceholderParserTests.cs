@@ -26,5 +26,4 @@ public class ConfigurationPlaceholderParserTests
             Assert.That(parsed["CopyTarget:Child:Value"], Is.EqualTo("from-values"));
         });
     }
-
 }
