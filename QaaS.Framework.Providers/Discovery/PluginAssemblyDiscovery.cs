@@ -10,18 +10,12 @@ namespace QaaS.Framework.Providers.Discovery;
 /// DLL scan. Deterministic results are cached per contract anchor for the process lifetime; only a
 /// transient failure inside the manifest walk bypasses the cache.
 /// </summary>
-public static class PluginAssemblyDiscovery
+internal static class PluginAssemblyDiscovery
 {
     private static readonly Dictionary<Assembly, IReadOnlyList<Assembly>> CachedDiscoveryResults = new();
     private static readonly Lock DiscoveryLock = new();
 
-    /// <summary>
-    /// Returns the candidate plugin assemblies for <paramref name="contractAnchor"/>.
-    /// </summary>
-    /// <param name="contractAnchor">Assembly that defines the contract whose implementors should be discovered.</param>
-    /// <param name="logger">Logger used to record load failures and skipped assemblies.</param>
-    /// <returns>The candidate assemblies, in undefined order; safe to enumerate concurrently.</returns>
-    public static IReadOnlyList<Assembly> Discover(Assembly contractAnchor, ILogger logger)
+    internal static IReadOnlyList<Assembly> Discover(Assembly contractAnchor, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(contractAnchor);
         ArgumentNullException.ThrowIfNull(logger);

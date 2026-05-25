@@ -28,5 +28,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="QaaS.Framework.Providers.Tests" />
+    <InternalsVisibleTo Include="QaaS.Runner" />
   </ItemGroup>
 </Project>
