@@ -15,7 +15,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private static readonly char PathSeparatorChar = ConfigurationConstants.PathSeparator[0];
 
-    private readonly HashSet<string> _resolutionStack = [];
+    private readonly HashSet<string> _activeResolutionPaths = [];
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
@@ -37,9 +37,13 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             // Snapshot — ResolvePlaceholderValue can mutate _pathsContainingPlaceholders mid-iteration.
             foreach (var placeholderPath in _pathsContainingPlaceholders.ToArray())
             {
-                var currentValue = _configuration[placeholderPath];
-                if (currentValue is not null && currentValue.Contains(PlaceholderStart, StringComparison.Ordinal))
+                var valueAtPlaceholderPath = _configuration[placeholderPath];
+                
+                if (valueAtPlaceholderPath is not null && valueAtPlaceholderPath.Contains(PlaceholderStart, StringComparison.Ordinal))
+                {
+                    // It may already be resolved indirectly while resolving another placeholder.
                     ResolvePlaceholderValue(placeholderPath);
+                }
             }
         } while (_modificationCount != modificationCountAtPassStart);
 
@@ -54,10 +58,14 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _existingPaths.Clear();
         _parentPathRefcounts.Clear();
         _pathsContainingPlaceholders.Clear();
+
+        // Walks the whole configuration tree as flattened paths, including deep YAML parents and leaves.
         foreach (var configurationEntry in _configuration.AsEnumerable())
         {
             if (_existingPaths.Add(configurationEntry.Key))
                 UpdateParentRefcounts(configurationEntry.Key, delta: +1);
+
+            // If the value contains "${", remember this path for resolving later
             if (configurationEntry.Value is { } entryValue && entryValue.Contains(PlaceholderStart, StringComparison.Ordinal))
                 _pathsContainingPlaceholders.Add(configurationEntry.Key);
         }
@@ -87,21 +95,26 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         {
             if (TryParseNextPlaceholder(sectionValue, nextScanIndex) is not { } placeholder) break;
 
+            // Get the config path that ${...} points to
             var referencedSection = GetSectionAtPath(placeholder.ReferencedPath);
             if (referencedSection is null && placeholder.DefaultValue is null) break;
 
             if (referencedSection is null)
             {
                 // Missing source with a default: splice the default in and recurse for nested placeholders.
-                var valueWithDefault = SpliceReplacementIntoValue(sectionValue, placeholder, placeholder.DefaultValue);
-                WriteValueAt(path, valueWithDefault);
+                string sectionValueWithDefaultApplied = SpliceReplacementIntoValue(sectionValue, placeholder, placeholder.DefaultValue);
+                WriteValueAt(path, sectionValueWithDefaultApplied);
                 currentSection = ResolvePlaceholderValue(path);
                 if (currentSection is null) break;
                 continue;
             }
 
-            if (!_resolutionStack.Add(placeholder.ReferencedPath))
-                throw new InvalidOperationException("Circular placeholder reference detected in configuration at: " + path);
+            if (!_activeResolutionPaths.Add(placeholder.ReferencedPath))
+            {
+                throw new InvalidOperationException(
+                    $"Configuration placeholder loop found: '{path}' refers back to '{placeholder.ReferencedPath}'. " +
+                    "Check the YAML placeholders that reference each other.");
+            }
 
             // try/finally so an exception during recursion doesn't leave the path stuck on the stack.
             try
@@ -127,7 +140,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             }
             finally
             {
-                _resolutionStack.Remove(placeholder.ReferencedPath);
+                _activeResolutionPaths.Remove(placeholder.ReferencedPath);
             }
         }
 
@@ -233,11 +246,14 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             parts.Length > 1 ? parts[1].Trim() : null);
     }
 
+    /// <summary>
+    /// Replaces the parsed placeholder span with the replacement while preserving surrounding text.
+    /// </summary>
     private static string SpliceReplacementIntoValue(string sectionValue, ParsedPlaceholder placeholder, string? replacement) =>
         sectionValue.Substring(0, placeholder.StartIndex) + replacement + sectionValue.Substring(placeholder.EndIndex + 1);
 
     /// <summary>
-    /// True when the placeholder doesn't span the entire value (has surrounding text).
+    /// True when there is any text or whitespace before or after the placeholder.
     /// </summary>
     private static bool IsPlaceholderEmbeddedInString(string sectionValue, ParsedPlaceholder placeholder) =>
         placeholder.StartIndex != 0 || placeholder.EndIndex != sectionValue.Length - 1;
