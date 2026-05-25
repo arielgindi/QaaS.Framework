@@ -5,17 +5,14 @@ using Microsoft.Extensions.Logging;
 namespace QaaS.Framework.Providers.Discovery;
 
 /// <summary>
-/// Resolves the assemblies that may contain plugin implementations of a given contract.
-/// Walks <see cref="DependencyContext.Default"/> in reverse from the contract anchor and loads
-/// only the assemblies the manifest declares as candidates. Falls back to a base-directory DLL
-/// scan only when the manifest is unusable (single-file publish, native AOT, contract loaded
-/// dynamically, transient walk failure). The bin scan is deliberately fallback-only — antivirus
-/// scans every file open, and reading the PE header of every DLL beside the entry assembly on
-/// every startup is unacceptable for deployments with many unrelated DLLs. The contract is that
-/// plugins are NuGet packages or ProjectReferences so they appear in deps.json. Loose DLLs that
-/// are present in the bin folder but absent from the manifest are NOT discovered on the fast
-/// path. Deterministic results are cached per contract anchor; only a transient manifest-walk
-/// exception bypasses the cache.
+/// Resolves the assemblies that may contain plugin implementations of a given contract by
+/// reverse-walking <see cref="DependencyContext.Default"/> from the contract anchor and loading
+/// only manifest-declared candidates. Falls back to a base-directory DLL scan only when the
+/// manifest is unusable (single-file publish, native AOT, contract loaded dynamically). The
+/// bin scan is deliberately fallback-only: AV file-open scanning makes "read every DLL beside
+/// the entry assembly" unacceptable on the hot startup path. Plugins must therefore be NuGet
+/// packages or ProjectReferences so they appear in deps.json. Deterministic results are cached
+/// per contract anchor; only a transient manifest-walk exception bypasses the cache.
 /// </summary>
 internal static class PluginAssemblyDiscovery
 {
@@ -50,10 +47,8 @@ internal static class PluginAssemblyDiscovery
         }
     }
 
-    // Builds the candidate set from AppDomain assemblies and the manifest reverse-walk. Runs a
-    // base-directory DLL scan only when the manifest cannot be used (null context, contract
-    // absent, or walk threw). IsDeterministic is true unless the walk threw; the caller uses it
-    // to decide whether to cache.
+    // Bin scan runs only when the manifest cannot produce a result. IsDeterministic is false
+    // only when the walk threw — the caller skips caching in that case.
     internal static (IReadOnlyList<Assembly> Assemblies, bool IsDeterministic) FindCandidateAssemblies(
         DependencyContext? dependencyContext,
         Assembly contractAnchor,

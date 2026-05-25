@@ -113,10 +113,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             }
             else
             {
-                // Recursively resolves the placeholder value path. Wrapped in try/finally so an
-                // exception thrown during recursion or substring-validation (e.g. object-placeholder
-                // used as substring) does not leave a stale entry in _resolutionStack that would
-                // make a subsequent valid resolve falsely look circular on the same parser instance.
+                // try/finally so an exception during recursion or substring-validation does not leave
+                // a stale entry in _resolutionStack and make a later valid resolve look falsely circular.
                 _resolutionStack.Add(placeholderValuePath);
                 try
                 {
@@ -182,9 +180,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         configKeys = configKeys.Concat(newConfigKeys).ToList();
         configuration = new ConfigurationBuilder().AddInMemoryCollection(configKeys).Build();
         _modificationCount++;
-        // The configuration tree was replaced. Rebuild the path indexes and the placeholder
-        // snapshot so the outer pass sees newly-copied paths (and the helpers operate on the
-        // new tree) starting with its next iteration.
+        // Tree was replaced — rebuild indexes so the outer pass sees the newly-copied paths.
         RebuildPathIndexAndCollectPlaceholders();
     }
 
