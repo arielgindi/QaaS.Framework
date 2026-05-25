@@ -1,7 +1,6 @@
 using System.Reflection;
-using System.Reflection.Metadata;
-using System.Reflection.PortableExecutable;
 using Microsoft.Extensions.Logging;
+using QaaS.Framework.Providers.Discovery;
 using QaaS.Framework.Providers.ObjectCreation;
 using QaaS.Framework.SDK.ContextObjects;
 using QaaS.Framework.SDK.Hooks;
@@ -30,145 +29,28 @@ public class HookProvider<THook> : IHookProvider<THook> where THook : IHook
     {
         _context = context;
         _objectCreator = objectCreator;
-        _hookAssemblies = GetHookAssemblies().ToArray();
+        _hookAssemblies = PluginAssemblyDiscovery
+            .Discover(typeof(THook).Assembly, _context.Logger)
+            .OrderBy(GetAssemblyPriority)
+            .ThenBy(assembly => assembly.FullName ?? assembly.GetName().Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         _supportedHookTypes = [];
     }
 
-    private const string QaasAssemblyPrefix = "QaaS.";
-
-    private static bool NameReachesQaas(string? name) =>
-        name is not null && name.StartsWith(QaasAssemblyPrefix, StringComparison.Ordinal);
-
     /// <summary>
-    /// Returns true if a bin-folder DLL transitively references QaaS.*, so it is worth Assembly.LoadFrom-ing.
-    /// Walks the AssemblyRef graph through other DLLs in the same folder (each read at most once) so
-    /// plugins reaching QaaS via a corporate base library are still included. Returns false on IO
-    /// failure for the root DLL; tolerates failures for intermediate DLLs in the walk.
+    /// Sort key for the discovered assemblies: framework assemblies first, then shared corporate
+    /// libraries, then everything else. <c>StartsWith</c> with a trailing dot keeps customer
+    /// assemblies such as <c>QaaSMyCustom.Plugin</c> or <c>MyCommonStuff.Plugin</c> out of the
+    /// framework tiers they only superficially resemble.
     /// </summary>
-    private static bool CouldContainHooks(
-        string assemblyPath,
-        string? assemblyName,
-        IReadOnlyDictionary<string, string> binFolderDllPathsByAssemblyName) =>
-        CouldContainHooksCore(assemblyPath, assemblyName, binFolderDllPathsByAssemblyName, ReadAssemblyReferenceNames);
-
-    /// <summary>
-    /// Pure algorithm split from the IO so unit tests can drive it with synthetic reference graphs.
-    /// </summary>
-    internal static bool CouldContainHooksCore(
-        string rootAssemblyPath,
-        string? rootAssemblyName,
-        IReadOnlyDictionary<string, string> binFolderDllPathsByAssemblyName,
-        Func<string, IReadOnlyList<string>?> readAssemblyReferenceNames)
-    {
-        if (NameReachesQaas(rootAssemblyName)) return true;
-
-        var visitedAssemblyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { rootAssemblyPath };
-        var assemblyPathsToProbe = new Queue<string>();
-        assemblyPathsToProbe.Enqueue(rootAssemblyPath);
-
-        while (assemblyPathsToProbe.Count > 0)
-        {
-            var currentAssemblyPath = assemblyPathsToProbe.Dequeue();
-            var referencedAssemblyNames = readAssemblyReferenceNames(currentAssemblyPath);
-            if (referencedAssemblyNames is null)
-            {
-                if (currentAssemblyPath == rootAssemblyPath) return false;
-                continue;
-            }
-
-            foreach (var referencedAssemblyName in referencedAssemblyNames)
-            {
-                if (NameReachesQaas(referencedAssemblyName)) return true;
-                if (binFolderDllPathsByAssemblyName.TryGetValue(referencedAssemblyName, out var referencedAssemblyPath)
-                    && visitedAssemblyPaths.Add(referencedAssemblyPath))
-                    assemblyPathsToProbe.Enqueue(referencedAssemblyPath);
-            }
-        }
-
-        return false;
-    }
-
-    private static IReadOnlyList<string>? ReadAssemblyReferenceNames(string assemblyPath)
-    {
-        try
-        {
-            using var assemblyFileStream = File.OpenRead(assemblyPath);
-            using var portableExecutableReader = new PEReader(assemblyFileStream);
-            if (!portableExecutableReader.HasMetadata) return [];
-            var metadataReader = portableExecutableReader.GetMetadataReader();
-            return metadataReader.AssemblyReferences
-                .Select(referenceHandle =>
-                    metadataReader.GetString(metadataReader.GetAssemblyReference(referenceHandle).Name))
-                .ToArray();
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static IEnumerable<Assembly> GetHookAssemblies()
-    {
-        var discoveredAssembliesByKey = new Dictionary<string, Assembly>(StringComparer.Ordinal);
-
-        AddAssembly(discoveredAssembliesByKey, Assembly.GetEntryAssembly());
-
-        foreach (var alreadyLoadedAssembly in AppDomain.CurrentDomain.GetAssemblies())
-            AddAssembly(discoveredAssembliesByKey, alreadyLoadedAssembly);
-
-        var binFolderPath = AppDomain.CurrentDomain.BaseDirectory;
-        var binFolderDllPaths = Directory.GetFiles(binFolderPath, "*.dll");
-
-        // Pre-index the bin folder by assembly simple name so CouldContainHooks can resolve
-        // referenced DLLs without scanning the directory on every reference lookup.
-        var binFolderDllPathsByAssemblyName =
-            new Dictionary<string, string>(binFolderDllPaths.Length, StringComparer.OrdinalIgnoreCase);
-        foreach (var binFolderDllPath in binFolderDllPaths)
-            binFolderDllPathsByAssemblyName[Path.GetFileNameWithoutExtension(binFolderDllPath)] = binFolderDllPath;
-
-        foreach (var binFolderDllPath in binFolderDllPaths)
-        {
-            try
-            {
-                var candidateAssemblyName = AssemblyName.GetAssemblyName(binFolderDllPath);
-                if (discoveredAssembliesByKey.ContainsKey(candidateAssemblyName.FullName ?? candidateAssemblyName.Name!))
-                    continue;
-
-                if (!CouldContainHooks(binFolderDllPath, candidateAssemblyName.Name, binFolderDllPathsByAssemblyName))
-                    continue;
-
-                AddAssembly(discoveredAssembliesByKey, Assembly.LoadFrom(binFolderDllPath));
-            }
-            catch
-            {
-                // ignore broken/unloadable binaries; debug details are logged when probing types per assembly.
-            }
-        }
-
-        return discoveredAssembliesByKey.Values
-            .OrderBy(GetAssemblyPriority)
-            .ThenBy(assembly => assembly.FullName ?? assembly.GetName().Name, StringComparer.OrdinalIgnoreCase);
-    }
-
     private static int GetAssemblyPriority(Assembly assembly)
     {
-        // Use StartsWith with a trailing dot so customer assemblies like "QaaSMyCustom.Plugin"
-        // or "MyCommonStuff.Plugin" don't collide with the QaaS / Common framework prefixes.
         var assemblyName = assembly.GetName().Name ?? string.Empty;
         if (assemblyName.StartsWith("QaaS.", StringComparison.OrdinalIgnoreCase))
             return 0;
         if (assemblyName.StartsWith("Common.", StringComparison.OrdinalIgnoreCase))
             return 1;
         return 2;
-    }
-
-    private static void AddAssembly(IDictionary<string, Assembly> assemblies, Assembly? assembly)
-    {
-        if (assembly is null || assembly.IsDynamic) return;
-
-        var key = assembly.FullName ?? assembly.GetName().Name;
-        if (string.IsNullOrWhiteSpace(key) || assemblies.ContainsKey(key)) return;
-        assemblies[key] = assembly;
     }
 
     private Type[] GetSupportedHookTypesFromAssembly(Assembly assembly)
