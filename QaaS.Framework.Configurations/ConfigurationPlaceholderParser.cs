@@ -3,7 +3,8 @@ using Microsoft.Extensions.Configuration;
 namespace QaaS.Framework.Configurations;
 
 /// <summary>
-/// Class that contains functionality for parsing the placeholder values in a configuration.
+/// Resolves <c>${...}</c> placeholders inside an <see cref="IConfiguration"/>.
+/// Scalar references substitute as text; object references to replace the destination subtree.
 /// </summary>
 public class ConfigurationPlaceholderParser(IConfiguration configuration)
 {
@@ -11,6 +12,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private const string NullSeparator = "??";
     private const char OpenCurlyBracket = '{';
     private const char CloseCurlyBracket = '}';
+
+    private static readonly char PathSeparatorChar = ConfigurationConstants.PathSeparator[0];
 
     private readonly HashSet<string> _resolutionStack = [];
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -20,9 +23,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private int _modificationCount;
 
     /// <summary>
-    /// Resolves every placeholder in the configuration and returns the resolved configuration.
-    /// Runs a fixed-point loop: each pass walks the paths that still contain a placeholder and
-    /// repeats until a pass produces no mutations.
+    /// Resolves every placeholder; runs passes until one produces no mutations.
     /// </summary>
     public IConfiguration ResolvePlaceholders()
     {
@@ -32,6 +33,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         do
         {
             modificationCountAtPassStart = _modificationCount;
+
+            // Snapshot — ResolvePlaceholderValue can mutate _pathsContainingPlaceholders mid-iteration.
             foreach (var placeholderPath in _pathsContainingPlaceholders.ToArray())
             {
                 var currentValue = _configuration[placeholderPath];
@@ -44,10 +47,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Walks the whole configuration tree once and (re)populates the three indexes used by the
-    /// resolver: <see cref="_existingPaths"/>, <see cref="_parentPathRefcounts"/>, and
-    /// <see cref="_pathsContainingPlaceholders"/>. Called once at the start of resolution; per-Copy
-    /// updates are then incremental (see <see cref="AddPathToIndex"/> / <see cref="RemovePathFromIndex"/>).
+    /// One-time O(N) index population; per-Copy updates are incremental.
     /// </summary>
     private void RebuildPathIndexAndCollectPlaceholders()
     {
@@ -57,16 +57,14 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         foreach (var configurationEntry in _configuration.AsEnumerable())
         {
             if (_existingPaths.Add(configurationEntry.Key))
-                IncrementParentRefcount(configurationEntry.Key);
+                UpdateParentRefcounts(configurationEntry.Key, delta: +1);
             if (configurationEntry.Value is { } entryValue && entryValue.Contains(PlaceholderStart, StringComparison.Ordinal))
                 _pathsContainingPlaceholders.Add(configurationEntry.Key);
         }
     }
 
     /// <summary>
-    /// Writes <paramref name="value"/> at <paramref name="path"/> in the configuration and keeps
-    /// the placeholder-membership index in sync. Bumps <see cref="_modificationCount"/> so the
-    /// outer fixed-point loop knows another pass is needed.
+    /// Writes a scalar value, syncs the placeholder index, bumps the modification counter.
     /// </summary>
     private void WriteValueAt(string path, string? value)
     {
@@ -76,10 +74,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Resolves every <c>${...}</c> placeholder inside the value at <paramref name="path"/>,
-    /// recursing into referenced paths as needed. Returns the resolved section, or null if the
-    /// path no longer exists in the configuration (which can happen for stale paths in the outer
-    /// loop's snapshot after a Copy).
+    /// Resolves every <c>${...}</c> in the value at <paramref name="path"/>, recursing into
+    /// referenced paths. Returns null if the path is gone (stale snapshot after a Copy).
     /// </summary>
     private IConfigurationSection? ResolvePlaceholderValue(string path)
     {
@@ -96,6 +92,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
             if (referencedSection is null)
             {
+                // Missing source with a default: splice the default in and recurse for nested placeholders.
                 var valueWithDefault = SpliceReplacementIntoValue(sectionValue, placeholder, placeholder.DefaultValue);
                 WriteValueAt(path, valueWithDefault);
                 currentSection = ResolvePlaceholderValue(path);
@@ -103,12 +100,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
                 continue;
             }
 
-            if (_resolutionStack.Contains(placeholder.ReferencedPath))
+            if (!_resolutionStack.Add(placeholder.ReferencedPath))
                 throw new InvalidOperationException("Circular placeholder reference detected in configuration at: " + path);
 
-            // try/finally so an exception during recursion or substring-validation does not leave
-            // a stale entry in _resolutionStack and make a later valid resolve look falsely circular.
-            _resolutionStack.Add(placeholder.ReferencedPath);
+            // try/finally so an exception during recursion doesn't leave the path stuck on the stack.
             try
             {
                 var resolvedSection = ResolvePlaceholderValue(placeholder.ReferencedPath);
@@ -116,6 +111,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
                 if (!IsStringLeaf(resolvedSection))
                 {
+                    // Object references are only legal when ${X} is the whole value — can't splice an object into a string.
                     if (IsPlaceholderEmbeddedInString(sectionValue, placeholder))
                         throw new InvalidOperationException("Placeholder reference to an object but is a substring value at: " + path);
 
@@ -124,9 +120,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
                     break;
                 }
 
-                sectionValue = SpliceReplacementIntoValue(sectionValue, placeholder, resolvedSection.Value);
+                var replacement = resolvedSection.Value ?? string.Empty;
+                sectionValue = SpliceReplacementIntoValue(sectionValue, placeholder, replacement);
                 WriteValueAt(path, sectionValue);
-                nextScanIndex = placeholder.StartIndex + resolvedSection.Value!.Length;
+                nextScanIndex = placeholder.StartIndex + replacement.Length;
             }
             finally
             {
@@ -138,30 +135,17 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// A section is a "string leaf" when it has a value AND no descendants — i.e. its path
-    /// is not an ancestor of any other key, tracked in <see cref="_parentPathRefcounts"/>.
+    /// True when the section has a value and no descendants.
     /// </summary>
-    private bool IsStringLeaf(IConfigurationSection section)
-    {
-        return section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
-    }
+    private bool IsStringLeaf(IConfigurationSection section) =>
+        section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
+
+    private IConfigurationSection? GetSectionAtPath(string path) =>
+        _existingPaths.Contains(path) ? _configuration.GetSection(path) : null;
 
     /// <summary>
-    /// Returns the section at <paramref name="path"/>, or null if <paramref name="path"/> is not
-    /// in the current configuration. The check uses <see cref="_existingPaths"/> rather than
-    /// inspecting <see cref="_configuration"/> directly so we avoid the cost of creating an
-    /// <see cref="IConfigurationSection"/> for paths we know aren't there.
-    /// </summary>
-    private IConfigurationSection? GetSectionAtPath(string path)
-    {
-        return _existingPaths.Contains(path) ? _configuration.GetSection(path) : null;
-    }
-
-    /// <summary>
-    /// Replaces the subtree at <paramref name="destinationPath"/> with the subtree at
-    /// <paramref name="sourcePath"/> (rebased to start with <paramref name="destinationPath"/>).
-    /// Updates all three indexes incrementally rather than rebuilding them, so the cost is
-    /// O(K × depth) — K = touched keys, depth = path depth — instead of O(N) over the whole tree.
+    /// Replaces the destination subtree with the source subtree. Indexes are updated incrementally —
+    /// O(K × depth) per call where K is touched keys, not O(N) over the whole tree.
     /// </summary>
     private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
     {
@@ -176,7 +160,9 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             .Where(entry => IsPathOrDescendant(entry.Key, sourcePath))
             .Select(entry => new KeyValuePair<string, string?>(RebasePathPrefix(entry.Key, sourcePath, destinationPath), entry.Value))
             .ToList();
+
         _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedEntries.Concat(addedEntries)).Build();
+
         foreach (var removedEntry in removedEntries)
             RemovePathFromIndex(removedEntry.Key);
         foreach (var addedEntry in addedEntries)
@@ -184,35 +170,20 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _modificationCount++;
     }
 
-    /// <summary>
-    /// Registers <paramref name="path"/> in all three indexes: marks it existing, increments
-    /// every ancestor's parent refcount, and adds it to the placeholder set if its value
-    /// contains a <c>${</c> marker.
-    /// </summary>
     private void AddPathToIndex(string path, string? value)
     {
         if (_existingPaths.Add(path))
-            IncrementParentRefcount(path);
+            UpdateParentRefcounts(path, delta: +1);
         RefreshPlaceholderMembership(path, value);
     }
 
-    /// <summary>
-    /// De-registers <paramref name="path"/> from all three indexes: drops it from the existing
-    /// set, decrements every ancestor's parent refcount, and drops it from the placeholder set.
-    /// </summary>
     private void RemovePathFromIndex(string path)
     {
         if (_existingPaths.Remove(path))
-            DecrementParentRefcount(path);
+            UpdateParentRefcounts(path, delta: -1);
         _pathsContainingPlaceholders.Remove(path);
     }
 
-    /// <summary>
-    /// Adds or removes <paramref name="path"/> in <see cref="_pathsContainingPlaceholders"/>
-    /// based on whether <paramref name="value"/> currently contains a <c>${</c> marker. Called
-    /// from <see cref="WriteValueAt"/> and <see cref="AddPathToIndex"/> to keep the placeholder
-    /// snapshot honest as values change.
-    /// </summary>
     private void RefreshPlaceholderMembership(string path, string? value)
     {
         if (value is not null && value.Contains(PlaceholderStart, StringComparison.Ordinal))
@@ -222,45 +193,28 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Walks the ancestor chain of <paramref name="path"/> and increments each ancestor's
-    /// refcount in <see cref="_parentPathRefcounts"/>. The 0→1 transition makes the ancestor
-    /// visible as a parent; later increments just keep the entry alive.
+    /// Walks ancestors and adjusts each one's refcount by <paramref name="delta"/>.
+    /// The 0→1 transition marks an ancestor as a parent; the 1→0 transition drops it.
     /// </summary>
-    private void IncrementParentRefcount(string path)
+    private void UpdateParentRefcounts(string path, int delta)
     {
         var ancestorPath = path;
         int lastPathSeparatorIndex;
-        while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(ConfigurationConstants.PathSeparator[0])) > 0)
+        while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(PathSeparatorChar)) > 0)
         {
             ancestorPath = ancestorPath[..lastPathSeparatorIndex];
-            _parentPathRefcounts[ancestorPath] = _parentPathRefcounts.GetValueOrDefault(ancestorPath) + 1;
-        }
-    }
+            var nextCount = _parentPathRefcounts.GetValueOrDefault(ancestorPath) + delta;
 
-    /// <summary>
-    /// Walks the ancestor chain of <paramref name="path"/> and decrements each ancestor's
-    /// refcount. The 1→0 transition removes the ancestor from <see cref="_parentPathRefcounts"/>,
-    /// at which point it stops being treated as a parent path.
-    /// </summary>
-    private void DecrementParentRefcount(string path)
-    {
-        var ancestorPath = path;
-        int lastPathSeparatorIndex;
-        while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(ConfigurationConstants.PathSeparator[0])) > 0)
-        {
-            ancestorPath = ancestorPath[..lastPathSeparatorIndex];
-            if (_parentPathRefcounts[ancestorPath] == 1)
+            // Remove only on 1->0; other descendants may still keep this parent alive.
+            if (nextCount == 0)
                 _parentPathRefcounts.Remove(ancestorPath);
             else
-                _parentPathRefcounts[ancestorPath]--;
+                _parentPathRefcounts[ancestorPath] = nextCount;
         }
     }
 
     /// <summary>
-    /// Finds the next <c>${...}</c> placeholder in <paramref name="sectionValue"/> starting at
-    /// or after <paramref name="searchFromIndex"/>. Returns null if no complete placeholder is
-    /// found. The body is split on <see cref="NullSeparator"/> into a referenced path and an
-    /// optional default value.
+    /// Finds the next <c>${X??default}</c> at or after <paramref name="searchFromIndex"/>, or null.
     /// </summary>
     private static ParsedPlaceholder? TryParseNextPlaceholder(string sectionValue, int searchFromIndex)
     {
@@ -279,51 +233,24 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             parts.Length > 1 ? parts[1].Trim() : null);
     }
 
-    /// <summary>
-    /// Returns <paramref name="sectionValue"/> with the text from the placeholder's start to its
-    /// end replaced by <paramref name="replacement"/>. The placeholder's start and end indexes
-    /// are inclusive of the <c>${</c> and <c>}</c> markers themselves.
-    /// </summary>
-    private static string SpliceReplacementIntoValue(string sectionValue, ParsedPlaceholder placeholder, string? replacement)
-    {
-        return sectionValue.Substring(0, placeholder.StartIndex) + replacement + sectionValue.Substring(placeholder.EndIndex + 1);
-    }
+    private static string SpliceReplacementIntoValue(string sectionValue, ParsedPlaceholder placeholder, string? replacement) =>
+        sectionValue.Substring(0, placeholder.StartIndex) + replacement + sectionValue.Substring(placeholder.EndIndex + 1);
 
     /// <summary>
-    /// True when the placeholder does not span the entire value — i.e. there are characters
-    /// before <c>${</c> or after the matching <c>}</c>. Object-typed references are only legal
-    /// when the value IS the placeholder (so we can replace it with a subtree); embedding an
-    /// object reference as a substring inside a larger string is rejected.
+    /// True when the placeholder doesn't span the entire value (has surrounding text).
     /// </summary>
-    private static bool IsPlaceholderEmbeddedInString(string sectionValue, ParsedPlaceholder placeholder)
-    {
-        return placeholder.StartIndex != 0 || placeholder.EndIndex != sectionValue.Length - 1;
-    }
+    private static bool IsPlaceholderEmbeddedInString(string sectionValue, ParsedPlaceholder placeholder) =>
+        placeholder.StartIndex != 0 || placeholder.EndIndex != sectionValue.Length - 1;
+
+    private static bool IsPathOrDescendant(string candidatePath, string path) =>
+        candidatePath.StartsWith(path, StringComparison.OrdinalIgnoreCase) &&
+        (candidatePath.Length == path.Length || candidatePath[path.Length] == PathSeparatorChar);
+
+    private static string RebasePathPrefix(string path, string sourcePath, string destinationPath) =>
+        path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
 
     /// <summary>
-    /// True when <paramref name="candidatePath"/> is exactly <paramref name="path"/> or sits
-    /// underneath it in the configuration tree (separated by <see cref="ConfigurationConstants.PathSeparator"/>).
-    /// </summary>
-    private static bool IsPathOrDescendant(string candidatePath, string path)
-    {
-        return candidatePath.Equals(path, StringComparison.OrdinalIgnoreCase) ||
-               candidatePath.StartsWith(path + ConfigurationConstants.PathSeparator, StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Returns <paramref name="path"/> with its <paramref name="sourcePath"/> prefix replaced by
-    /// <paramref name="destinationPath"/>. Used to rebase keys when an object subtree is copied
-    /// from one place in the configuration to another.
-    /// </summary>
-    private static string RebasePathPrefix(string path, string sourcePath, string destinationPath)
-    {
-        return path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
-    }
-
-    /// <summary>
-    /// Scans forward from <paramref name="startIndex"/> in <paramref name="str"/> to find the
-    /// position of the closing <c>}</c> that matches the <c>{</c> at <paramref name="startIndex"/> - 1.
-    /// Tracks brace depth so nested braces are handled correctly. Returns -1 if no match exists.
+    /// Finds the matching <c>}</c> for the <c>${</c> at <paramref name="startIndex"/> - 2, tracking nested depth.
     /// </summary>
     private static int FindClosingBracket(string str, int startIndex)
     {
@@ -338,10 +265,6 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return -1;
     }
 
-    /// <summary>
-    /// One parsed <c>${ReferencedPath??DefaultValue}</c> placeholder occurrence inside a section's value.
-    /// <c>StartIndex</c> points at the <c>$</c> of <c>${</c>; <c>EndIndex</c> points at the matching <c>}</c>.
-    /// </summary>
     private readonly record struct ParsedPlaceholder(
         int StartIndex,
         int EndIndex,
