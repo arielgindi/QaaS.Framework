@@ -17,6 +17,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private readonly HashSet<string> _activeResolutionPaths = [];
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string?> _configurationEntries = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
     private IConfiguration _configuration = configuration;
@@ -56,12 +57,15 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private void RebuildPathIndexAndCollectPlaceholders()
     {
         _existingPaths.Clear();
+        _configurationEntries.Clear();
         _parentPathRefcounts.Clear();
         _pathsContainingPlaceholders.Clear();
 
         // Walks the whole configuration tree as flattened paths, including deep YAML parents and leaves.
         foreach (var configurationEntry in _configuration.AsEnumerable())
         {
+            _configurationEntries[configurationEntry.Key] = configurationEntry.Value;
+
             if (_existingPaths.Add(configurationEntry.Key))
                 UpdateParentRefcounts(configurationEntry.Key, delta: +1);
 
@@ -76,6 +80,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// </summary>
     private void WriteValueAt(string path, string? value)
     {
+        _configurationEntries[path] = value;
         _configuration[path] = value;
         RefreshPlaceholderMembership(path, value);
         _modificationCount++;
@@ -157,24 +162,25 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         _existingPaths.Contains(path) ? _configuration.GetSection(path) : null;
 
     /// <summary>
-    /// Replaces the destination subtree with the source subtree. Indexes are updated incrementally —
-    /// O(K × depth) per call where K is touched keys, not O(N) over the whole tree.
+    /// Replaces the destination subtree with the source subtree using the cached flattened entries.
     /// </summary>
     private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
     {
-        var allEntries = _configuration.AsEnumerable().ToList();
-        var removedEntries = allEntries
+        var removedEntries = _configurationEntries
             .Where(entry => IsPathOrDescendant(entry.Key, destinationPath))
             .ToList();
-        var preservedEntries = allEntries
-            .Where(entry => !IsPathOrDescendant(entry.Key, destinationPath))
-            .ToList();
-        var addedEntries = preservedEntries
-            .Where(entry => IsPathOrDescendant(entry.Key, sourcePath))
+        var addedEntries = _configurationEntries
+            .Where(entry => !IsPathOrDescendant(entry.Key, destinationPath) &&
+                            IsPathOrDescendant(entry.Key, sourcePath))
             .Select(entry => new KeyValuePair<string, string?>(RebasePathPrefix(entry.Key, sourcePath, destinationPath), entry.Value))
             .ToList();
 
-        _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedEntries.Concat(addedEntries)).Build();
+        foreach (var removedEntry in removedEntries)
+            _configurationEntries.Remove(removedEntry.Key);
+        foreach (var addedEntry in addedEntries)
+            _configurationEntries[addedEntry.Key] = addedEntry.Value;
+
+        _configuration = new ConfigurationBuilder().AddInMemoryCollection(_configurationEntries).Build();
 
         foreach (var removedEntry in removedEntries)
             RemovePathFromIndex(removedEntry.Key);
