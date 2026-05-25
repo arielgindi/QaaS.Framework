@@ -47,8 +47,10 @@ internal static class PluginAssemblyDiscovery
         }
     }
 
-    // Bin scan runs only when the manifest cannot produce a result. IsDeterministic is false
-    // only when the walk threw — the caller skips caching in that case.
+    /// <summary>
+    /// Bin scan runs only when the manifest cannot produce a result. <c>IsDeterministic</c> is false
+    /// only when the walk threw — the caller skips caching in that case.
+    /// </summary>
     internal static (IReadOnlyList<Assembly> Assemblies, bool IsDeterministic) FindCandidateAssemblies(
         DependencyContext? dependencyContext,
         Assembly contractAnchor,
@@ -138,9 +140,11 @@ internal static class PluginAssemblyDiscovery
         return ManifestWalkOutcome.Succeeded;
     }
 
-    // Walks the dependency graph in reverse from every library that ships contractAssemblyName and
-    // returns the runtime assembly names of every library that transitively depends on it. Cycles
-    // are tolerated; disconnected libraries are excluded. Empty when the contract is absent.
+    /// <summary>
+    /// Walks the dependency graph in reverse from every library that ships <paramref name="contractAssemblyName"/>
+    /// and returns the runtime assembly names of every library that transitively depends on it. Cycles
+    /// are tolerated; disconnected libraries are excluded. Empty when the contract is absent.
+    /// </summary>
     internal static IReadOnlySet<string> FindAssembliesReferencingContract(
         DependencyContext dependencyContext,
         string contractAssemblyName)

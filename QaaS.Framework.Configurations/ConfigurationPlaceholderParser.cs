@@ -5,7 +5,7 @@ namespace QaaS.Framework.Configurations;
 /// <summary>
 /// Class that contains functionality for parsing the placeholder values in a configuration.
 /// </summary>
-public class ConfigurationPlaceholderParser
+public class ConfigurationPlaceholderParser(IConfiguration configuration)
 {
     private const string PlaceholderStart = "${";
     private const string PlaceholderEnd = "}";
@@ -17,13 +17,8 @@ public class ConfigurationPlaceholderParser
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
-    private IConfiguration _configuration;
+    private IConfiguration _configuration = configuration;
     private int _modificationCount;
-
-    public ConfigurationPlaceholderParser(IConfiguration configuration)
-    {
-        _configuration = configuration;
-    }
 
     /// <summary>
     /// Resolves all the placeholders in the configuration and returns the resolved configuration.
@@ -36,19 +31,21 @@ public class ConfigurationPlaceholderParser
         do
         {
             modificationCountAtPassStart = _modificationCount;
-            foreach (var placeholderPath in _pathsContainingPlaceholders.ToArray())
+            foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders.ToArray())
             {
-                var currentValue = _configuration[placeholderPath];
-                if (currentValue is not null && currentValue.Contains(PlaceholderStart, StringComparison.Ordinal))
-                    ResolvePlaceholderValue(placeholderPath);
+                var currentValueAtPath = _configuration[pathContainingPlaceholder];
+                if (currentValueAtPath is not null && currentValueAtPath.Contains(PlaceholderStart, StringComparison.Ordinal))
+                    ResolvePlaceholderValue(pathContainingPlaceholder);
             }
         } while (_modificationCount != modificationCountAtPassStart);
 
         return _configuration;
     }
 
-    // Single pass over the config tree: refreshes the path-index sets and the placeholder snapshot so
-    // the outer resolver iterates only the leaves that need work and path-existence checks stay O(1).
+    /// <summary>
+    /// Single pass over the config tree: refreshes the path-index sets and the placeholder snapshot so
+    /// the outer resolver iterates only the leaves that need work and path-existence checks stay O(1).
+    /// </summary>
     private void RebuildPathIndexAndCollectPlaceholders()
     {
         _existingPaths.Clear();
@@ -79,11 +76,11 @@ public class ConfigurationPlaceholderParser
     {
         var currentSection = GetSectionAtPath(path);
         if (currentSection is null || !IsStringLeaf(currentSection)) return currentSection;
-        var nextScanIndex = 0;
+        var lastEnd = 0;
 
         while (currentSection.Value is { } sectionValue)
         {
-            var placeholderStartIndex = sectionValue.IndexOf(PlaceholderStart, nextScanIndex, StringComparison.Ordinal);
+            var placeholderStartIndex = sectionValue.IndexOf(PlaceholderStart, lastEnd, StringComparison.Ordinal);
             if (placeholderStartIndex is -1) break;
 
             var placeholderEndIndex = FindClosingBracket(sectionValue, placeholderStartIndex + 2);
@@ -132,7 +129,7 @@ public class ConfigurationPlaceholderParser
 
                     sectionValue = sectionValue.Substring(0, placeholderStartIndex) + resolvedSection.Value + sectionValue.Substring(placeholderEndIndex + 1);
                     SetValue(path, sectionValue);
-                    nextScanIndex = placeholderStartIndex + resolvedSection.Value!.Length; // Value is non-null because IsStringLeaf returned true.
+                    lastEnd = placeholderStartIndex + resolvedSection.Value!.Length; // Value is non-null because IsStringLeaf returned true.
                 }
                 finally
                 {
@@ -144,8 +141,10 @@ public class ConfigurationPlaceholderParser
         return currentSection;
     }
 
-    // A section is a "string leaf" when it has a value AND no descendants — i.e. its path
-    // is not an ancestor of any other key, tracked in _parentPathRefcounts.
+    /// <summary>
+    /// A section is a "string leaf" when it has a value AND no descendants — i.e. its path
+    /// is not an ancestor of any other key, tracked in <see cref="_parentPathRefcounts"/>.
+    /// </summary>
     private bool IsStringLeaf(IConfigurationSection section)
     {
         return section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
@@ -159,21 +158,21 @@ public class ConfigurationPlaceholderParser
     private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
     {
         var allEntries = _configuration.AsEnumerable().ToList();
-        var removedEntries = allEntries
-            .Where(entry => IsPathOrDescendant(entry.Key, destinationPath))
+        var removedConfigKeys = allEntries
+            .Where(kvp => IsPathOrDescendant(kvp.Key, destinationPath))
             .ToList();
-        var preservedEntries = allEntries
-            .Where(entry => !IsPathOrDescendant(entry.Key, destinationPath))
+        var preservedConfigKeys = allEntries
+            .Where(kvp => !IsPathOrDescendant(kvp.Key, destinationPath))
             .ToList();
-        var addedEntries = preservedEntries
-            .Where(entry => IsPathOrDescendant(entry.Key, sourcePath))
-            .Select(entry => new KeyValuePair<string, string?>(RebasePathPrefix(entry.Key, sourcePath, destinationPath), entry.Value))
+        var newConfigKeys = preservedConfigKeys
+            .Where(kvp => IsPathOrDescendant(kvp.Key, sourcePath))
+            .Select(kvp => new KeyValuePair<string, string?>(RebasePathPrefix(kvp.Key, sourcePath, destinationPath), kvp.Value))
             .ToList();
-        _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedEntries.Concat(addedEntries)).Build();
-        foreach (var removedEntry in removedEntries)
-            RemovePathFromIndex(removedEntry.Key);
-        foreach (var addedEntry in addedEntries)
-            AddPathToIndex(addedEntry.Key, addedEntry.Value);
+        _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedConfigKeys.Concat(newConfigKeys)).Build();
+        foreach (var removedConfigKey in removedConfigKeys)
+            RemovePathFromIndex(removedConfigKey.Key);
+        foreach (var newConfigKey in newConfigKeys)
+            AddPathToIndex(newConfigKey.Key, newConfigKey.Value);
         _modificationCount++;
     }
 
