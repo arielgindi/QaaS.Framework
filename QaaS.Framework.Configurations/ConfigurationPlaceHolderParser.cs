@@ -15,8 +15,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private readonly HashSet<string> _resolutionStack = new();
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _parentPaths = new(StringComparer.OrdinalIgnoreCase);
-    private List<string> _pathsContainingPlaceholders = [];
+    private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
     private int _modificationCount;
 
     /// <summary>
@@ -30,7 +30,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         do
         {
             modificationCountAtPassStart = _modificationCount;
-            foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders)
+            foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders.ToArray())
             {
                 var currentValueAtPath = configuration[pathContainingPlaceholder];
                 if (currentValueAtPath is not null && currentValueAtPath.Contains(Prefix, StringComparison.Ordinal))
@@ -46,27 +46,21 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private void RebuildPathIndexAndCollectPlaceholders()
     {
         _existingPaths.Clear();
-        _parentPaths.Clear();
-        var pathsContainingPlaceholders = new List<string>();
+        _parentPathRefcounts.Clear();
+        _pathsContainingPlaceholders.Clear();
         foreach (var configurationEntry in configuration.AsEnumerable())
         {
-            _existingPaths.Add(configurationEntry.Key);
-            var ancestorPath = configurationEntry.Key;
-            int lastPathSeparatorIndex;
-            while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(ConfigurationConstants.PathSeparator[0])) > 0)
-            {
-                ancestorPath = ancestorPath[..lastPathSeparatorIndex];
-                if (!_parentPaths.Add(ancestorPath)) break;
-            }
+            if (_existingPaths.Add(configurationEntry.Key))
+                IncrementParentRefcount(configurationEntry.Key);
             if (configurationEntry.Value is { } entryValue && entryValue.Contains(Prefix, StringComparison.Ordinal))
-                pathsContainingPlaceholders.Add(configurationEntry.Key);
+                _pathsContainingPlaceholders.Add(configurationEntry.Key);
         }
-        _pathsContainingPlaceholders = pathsContainingPlaceholders;
     }
 
     private void SetValue(string path, string? value)
     {
         configuration[path] = value;
+        UpdatePlaceholderPath(path, value);
         _modificationCount++;
     }
 
@@ -153,10 +147,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     // A section is a "string leaf" when it has a value AND no descendants — i.e. its path
-    // is not an ancestor of any other key, tracked in _parentPaths by RebuildPathIndexAndCollectPlaceholders.
+    // is not an ancestor of any other key, tracked in _parentPathRefcounts.
     private bool IsConfigurationSectionString(IConfigurationSection section)
     {
-        return section.Value != null && !_parentPaths.Contains(section.Path);
+        return section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
     }
 
     /// <summary>
@@ -172,16 +166,83 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// </summary>
     private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
     {
-        var configKeys = configuration.AsEnumerable()
-            .Where(kvp => !(kvp.Key.Equals(destinationPath) || kvp.Key.StartsWith(destinationPath + ConfigurationConstants.PathSeparator))).ToList();
-        var newConfigKeys = configKeys.Where(kvp => kvp.Key.Equals(sourcePath) ||kvp.Key.StartsWith(sourcePath + ConfigurationConstants.PathSeparator))
-            .Select(kvp => new KeyValuePair<string, string?>(kvp.Key.Replace(sourcePath, destinationPath), kvp.Value))
+        var destinationEntries = configuration.AsEnumerable().ToList();
+        var removedConfigKeys = destinationEntries
+            .Where(kvp => IsPathOrDescendant(kvp.Key, destinationPath))
+            .ToList();
+        var configKeys = destinationEntries
+            .Where(kvp => !IsPathOrDescendant(kvp.Key, destinationPath))
+            .ToList();
+        var newConfigKeys = configKeys
+            .Where(kvp => IsPathOrDescendant(kvp.Key, sourcePath))
+            .Select(kvp => new KeyValuePair<string, string?>(ReplacePathPrefix(kvp.Key, sourcePath, destinationPath), kvp.Value))
             .ToList();
         configKeys = configKeys.Concat(newConfigKeys).ToList();
         configuration = new ConfigurationBuilder().AddInMemoryCollection(configKeys).Build();
+        foreach (var removedConfigKey in removedConfigKeys)
+            RemovePathFromIndex(removedConfigKey.Key);
+        foreach (var newConfigKey in newConfigKeys)
+            AddPathToIndex(newConfigKey.Key, newConfigKey.Value);
         _modificationCount++;
-        // Tree was replaced — rebuild indexes so the outer pass sees the newly-copied paths.
-        RebuildPathIndexAndCollectPlaceholders();
+    }
+
+    private void AddPathToIndex(string path, string? value)
+    {
+        if (_existingPaths.Add(path))
+            IncrementParentRefcount(path);
+        UpdatePlaceholderPath(path, value);
+    }
+
+    private void RemovePathFromIndex(string path)
+    {
+        if (_existingPaths.Remove(path))
+            DecrementParentRefcount(path);
+        _pathsContainingPlaceholders.Remove(path);
+    }
+
+    private void UpdatePlaceholderPath(string path, string? value)
+    {
+        if (value is not null && value.Contains(Prefix, StringComparison.Ordinal))
+            _pathsContainingPlaceholders.Add(path);
+        else
+            _pathsContainingPlaceholders.Remove(path);
+    }
+
+    private void IncrementParentRefcount(string path)
+    {
+        var ancestorPath = path;
+        int lastPathSeparatorIndex;
+        while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(ConfigurationConstants.PathSeparator[0])) > 0)
+        {
+            ancestorPath = ancestorPath[..lastPathSeparatorIndex];
+            // 0->1 makes the path visible as a parent; later increments only keep it alive.
+            _parentPathRefcounts[ancestorPath] = _parentPathRefcounts.GetValueOrDefault(ancestorPath) + 1;
+        }
+    }
+
+    private void DecrementParentRefcount(string path)
+    {
+        var ancestorPath = path;
+        int lastPathSeparatorIndex;
+        while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(ConfigurationConstants.PathSeparator[0])) > 0)
+        {
+            ancestorPath = ancestorPath[..lastPathSeparatorIndex];
+            if (_parentPathRefcounts[ancestorPath] == 1)
+                _parentPathRefcounts.Remove(ancestorPath);
+            else
+                _parentPathRefcounts[ancestorPath]--;
+        }
+    }
+
+    private static bool IsPathOrDescendant(string candidatePath, string path)
+    {
+        return candidatePath.Equals(path, StringComparison.OrdinalIgnoreCase) ||
+               candidatePath.StartsWith(path + ConfigurationConstants.PathSeparator, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ReplacePathPrefix(string path, string sourcePath, string destinationPath)
+    {
+        return path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
     }
 
     private static int FindClosingBracket(string str, int startIndex)
