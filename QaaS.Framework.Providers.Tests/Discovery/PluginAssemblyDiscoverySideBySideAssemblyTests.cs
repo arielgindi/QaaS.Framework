@@ -54,7 +54,7 @@ public class PluginAssemblyDiscoverySideBySideAssemblyTests
 
             var context = BuildContext(Library(simpleName));
 
-            var (assemblies, fromManifest) = PluginAssemblyDiscovery.FindCandidateAssemblies(
+            var (assemblies, isDeterministic) = PluginAssemblyDiscovery.FindCandidateAssemblies(
                 context,
                 first,
                 Mock.Of<ILogger>());
@@ -66,7 +66,7 @@ public class PluginAssemblyDiscoverySideBySideAssemblyTests
                 .OrderBy(version => version)
                 .ToArray();
 
-            Assert.That(fromManifest, Is.True);
+            Assert.That(isDeterministic, Is.True);
             Assert.That(
                 discoveredVersions,
                 Is.EquivalentTo(new[] { "1.0.0.0", "2.0.0.0" }),
@@ -164,8 +164,12 @@ public class PluginAssemblyDiscoverySideBySideAssemblyTests
 
         Assert.That(process, Is.Not.Null, "Could not start dotnet build for side-by-side test assembly.");
 
-        var exited = process!.WaitForExit(milliseconds: 120000);
-        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+        // Drain stdout/stderr concurrently with WaitForExit so a noisy build cannot fill the
+        // OS pipe buffer and deadlock the child.
+        var stdoutTask = process!.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var exited = process.WaitForExit(milliseconds: 120000);
+        var output = stdoutTask.GetAwaiter().GetResult() + stderrTask.GetAwaiter().GetResult();
 
         if (!exited)
         {

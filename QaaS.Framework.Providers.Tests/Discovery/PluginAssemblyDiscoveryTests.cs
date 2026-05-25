@@ -18,14 +18,14 @@ public class PluginAssemblyDiscoveryTests
     public void ResetCache() => PluginAssemblyDiscovery.ResetCacheForTesting();
 
     [Test]
-    public void Discover_WhenDependencyContextIsNull_FallsBackToBinScan()
+    public void Discover_WhenDependencyContextIsNull_StillReturnsContractAnchorFromBinScan()
     {
-        var (assemblies, fromManifest) = PluginAssemblyDiscovery.FindCandidateAssemblies(
+        var (assemblies, isDeterministic) = PluginAssemblyDiscovery.FindCandidateAssemblies(
             dependencyContext: null,
             contractAnchor: ContractAnchorAssembly,
             logger: Mock.Of<ILogger>());
 
-        Assert.That(fromManifest, Is.False);
+        Assert.That(isDeterministic, Is.True, "Null DependencyContext is a permanent process condition, not a transient failure.");
         Assert.That(assemblies, Is.Not.Empty);
         Assert.That(
             assemblies.Any(assembly => assembly == ContractAnchorAssembly),
@@ -33,20 +33,20 @@ public class PluginAssemblyDiscoveryTests
     }
 
     [Test]
-    public void Discover_WhenContractAssemblyAbsentFromManifest_FallsBackToBinScan()
+    public void Discover_WhenContractAssemblyAbsentFromManifest_StillReturnsContractAnchorFromBinScan()
     {
         var context = BuildContext(Library("Some.Unrelated.Lib"), Library("Some.Other.Lib", "Some.Unrelated.Lib"));
 
-        var (assemblies, fromManifest) = PluginAssemblyDiscovery.FindCandidateAssemblies(
+        var (assemblies, isDeterministic) = PluginAssemblyDiscovery.FindCandidateAssemblies(
             context,
             ContractAnchorAssembly,
             Mock.Of<ILogger>());
 
-        Assert.That(fromManifest, Is.False);
+        Assert.That(isDeterministic, Is.True, "Contract absent from manifest is a permanent process condition.");
         Assert.That(
             assemblies.Any(assembly => assembly == ContractAnchorAssembly),
             Is.True,
-            "Fallback bin scan should still discover the contract assembly.");
+            "Bin scan should still discover the contract assembly.");
     }
 
     [Test]

@@ -7,12 +7,12 @@ namespace QaaS.Framework.Providers.Discovery;
 /// <summary>
 /// Resolves the assemblies that may contain plugin implementations of a given contract by combining
 /// loaded AppDomain assemblies, the manifest reverse-walk from the contract anchor, and a base-directory
-/// DLL scan. Successful results are cached per contract anchor for the process lifetime.
+/// DLL scan. Deterministic results are cached per contract anchor for the process lifetime; only a
+/// transient failure inside the manifest walk bypasses the cache.
 /// </summary>
 public static class PluginAssemblyDiscovery
 {
-    private static readonly Dictionary<string, IReadOnlyList<Assembly>> CachedDiscoveryResults =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<Assembly, IReadOnlyList<Assembly>> CachedDiscoveryResults = new();
     private static readonly Lock DiscoveryLock = new();
 
     /// <summary>
@@ -26,30 +26,33 @@ public static class PluginAssemblyDiscovery
         ArgumentNullException.ThrowIfNull(contractAnchor);
         ArgumentNullException.ThrowIfNull(logger);
 
-        var cacheKey = contractAnchor.FullName ?? contractAnchor.GetName().Name;
+        lock (DiscoveryLock)
+        {
+            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var cached))
+                return cached;
+        }
+
+        var (assemblies, isDeterministic) =
+            FindCandidateAssemblies(DependencyContext.Default, contractAnchor, logger);
+
+        if (!isDeterministic)
+            return assemblies;
 
         lock (DiscoveryLock)
         {
-            if (cacheKey is not null && CachedDiscoveryResults.TryGetValue(cacheKey, out var cached))
-                return cached;
-
-            var (assemblies, fromManifest) =
-                FindCandidateAssemblies(DependencyContext.Default, contractAnchor, logger);
-
-            if (fromManifest && cacheKey is not null)
-                CachedDiscoveryResults[cacheKey] = assemblies;
-
+            // Another caller may have raced ahead and stored its own list; return that one so every
+            // concurrent first-caller observes a single shared instance.
+            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var raceWinner))
+                return raceWinner;
+            CachedDiscoveryResults[contractAnchor] = assemblies;
             return assemblies;
         }
     }
 
-    /// <summary>
-    /// Builds the candidate set from AppDomain assemblies, the manifest reverse-walk (when usable),
-    /// and a base-directory DLL scan. <c>FromManifest</c> is <c>true</c> iff the manifest walk
-    /// produced at least one referencing assembly name; the caller uses this to decide whether
-    /// the result is stable enough to cache.
-    /// </summary>
-    internal static (IReadOnlyList<Assembly> Assemblies, bool FromManifest) FindCandidateAssemblies(
+    // Builds the candidate set from AppDomain assemblies, the manifest reverse-walk (when usable),
+    // and a base-directory DLL scan. IsDeterministic is true unless an exception was caught during
+    // the manifest walk; the caller uses it to decide whether the result is safe to cache.
+    internal static (IReadOnlyList<Assembly> Assemblies, bool IsDeterministic) FindCandidateAssemblies(
         DependencyContext? dependencyContext,
         Assembly contractAnchor,
         ILogger logger)
@@ -58,11 +61,11 @@ public static class PluginAssemblyDiscovery
         var simpleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         SeedFromAppDomain(assembliesByFullName, simpleNames);
-        var fromManifest = AddManifestReferencingAssemblies(
+        var isDeterministic = AddManifestReferencingAssemblies(
             dependencyContext, contractAnchor, assembliesByFullName, simpleNames, logger);
         AddBaseDirectoryAssemblies(assembliesByFullName, simpleNames, logger);
 
-        return ([.. assembliesByFullName.Values], fromManifest);
+        return ([.. assembliesByFullName.Values], isDeterministic);
     }
 
     private static bool AddManifestReferencingAssemblies(
@@ -75,18 +78,18 @@ public static class PluginAssemblyDiscovery
         var contractName = contractAnchor.GetName().Name;
         if (string.IsNullOrEmpty(contractName))
         {
-            logger.LogInformation(
+            logger.LogDebug(
                 "Plugin discovery skipping manifest walk: contract anchor has no simple name. {ContractAssembly}",
                 contractAnchor.FullName);
-            return false;
+            return true;
         }
 
         if (dependencyContext is null)
         {
-            logger.LogInformation(
+            logger.LogDebug(
                 "Plugin discovery skipping manifest walk: DependencyContext.Default is unavailable for {ContractAssembly}.",
                 contractName);
-            return false;
+            return true;
         }
 
         IReadOnlySet<string> referencingAssemblyNames;
@@ -102,10 +105,10 @@ public static class PluginAssemblyDiscovery
 
         if (referencingAssemblyNames.Count == 0)
         {
-            logger.LogInformation(
+            logger.LogDebug(
                 "Plugin discovery skipping manifest walk: contract assembly {ContractAssembly} not present in dependency manifest.",
                 contractName);
-            return false;
+            return true;
         }
 
         foreach (var assemblyName in referencingAssemblyNames)
@@ -128,11 +131,9 @@ public static class PluginAssemblyDiscovery
         return true;
     }
 
-    /// <summary>
-    /// Walks the dependency graph in reverse from every library that ships <paramref name="contractAssemblyName"/>
-    /// and returns the runtime assembly names of every library that transitively depends on it. Cycles are
-    /// tolerated; disconnected libraries are excluded. Empty when the contract is absent from the manifest.
-    /// </summary>
+    // Walks the dependency graph in reverse from every library that ships contractAssemblyName and
+    // returns the runtime assembly names of every library that transitively depends on it. Cycles
+    // are tolerated; disconnected libraries are excluded. Empty when the contract is absent.
     internal static IReadOnlySet<string> FindAssembliesReferencingContract(
         DependencyContext dependencyContext,
         string contractAssemblyName)

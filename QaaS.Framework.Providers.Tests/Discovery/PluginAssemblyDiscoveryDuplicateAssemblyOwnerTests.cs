@@ -4,19 +4,10 @@ using QaaS.Framework.Providers.Discovery;
 
 namespace QaaS.Framework.Providers.Tests.Discovery;
 
-/// <summary>
-/// Adversarial: when two RuntimeLibrary entries each emit a runtime assembly with the
-/// same simple name as the contract anchor, only the *first* library is recorded as the
-/// owner (libraryOwningAssembly uses TryAdd). The reverse-walk therefore starts from a
-/// single seed and silently drops the entire subgraph of dependents that hang off the
-/// second library.
-///
-/// Real-world trigger: a plugin host that ships the contract anchor next to an SDK
-/// metapackage which also re-exposes the contract assembly under the same simple name
-/// (think `Microsoft.Bcl.AsyncInterfaces` style polyfills, or a contract assembly that
-/// is split across a primary package and a back-compat shim package). NuGet does not
-/// forbid two packages from publishing the same simple-named DLL.
-/// </summary>
+// When two RuntimeLibrary entries each ship the contract assembly under the same simple name
+// (e.g. a primary package + back-compat shim), the reverse-walk must seed from BOTH owning
+// libraries. Regression guard: prior implementation used TryAdd and silently dropped the second
+// library's subgraph.
 [TestFixture]
 public class PluginAssemblyDiscoveryDuplicateAssemblyOwnerTests
 {

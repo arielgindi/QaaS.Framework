@@ -14,7 +14,7 @@ public class HookProvider<THook> : IHookProvider<THook> where THook : IHook
     private readonly Assembly[] _hookAssemblies;
     private readonly Lock _hookTypeCacheLock = new();
     private readonly IByNameObjectCreator _objectCreator;
-    private readonly Dictionary<string, Type[]> _supportedHookTypesByAssembly = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Type[]> _supportedHookTypesByAssembly = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Constructor
@@ -77,9 +77,7 @@ public class HookProvider<THook> : IHookProvider<THook> where THook : IHook
         var supportedHookTypesInAssembly = loadableTypes.Where(_objectCreator.IsTypeSubClassOfT<THook>).ToArray();
         lock (_hookTypeCacheLock)
         {
-            // First-writer-wins: a peer thread that ran through the slow path concurrently may
-            // have observed a successful GetTypes while we observed a transient failure (empty).
-            // Returning the already-cached value preserves that successful result.
+            // First-writer-wins: a concurrent thread may have already populated the cache.
             if (_supportedHookTypesByAssembly.TryGetValue(assemblyKey, out var existingCachedHookTypes))
                 return existingCachedHookTypes;
             _supportedHookTypesByAssembly[assemblyKey] = supportedHookTypesInAssembly;

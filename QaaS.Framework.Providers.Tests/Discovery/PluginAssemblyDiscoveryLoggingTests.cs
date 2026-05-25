@@ -28,7 +28,7 @@ public class PluginAssemblyDiscoveryLoggingTests
             logger.Object);
 
         logger.Verify(log => log.Log(
-                It.Is<LogLevel>(level => level == LogLevel.Information),
+                It.Is<LogLevel>(level => level == LogLevel.Debug),
                 It.IsAny<EventId>(),
                 It.Is<It.IsAnyType>((state, _) =>
                     ContainsStructuredValue(state, "ContractAssembly", contractAssemblyName)),
