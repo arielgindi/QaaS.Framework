@@ -311,7 +311,7 @@ public class ConfigurationUtilitiesTests
             })
             .Build();
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<FormatException>(
             () => new ConfigurationPlaceholderParser(configuration).ResolvePlaceholders());
     }
 
@@ -342,7 +342,7 @@ public class ConfigurationUtilitiesTests
             .Build();
         var parser = new ConfigurationPlaceholderParser(configuration);
 
-        Assert.Throws<InvalidOperationException>(() => parser.ResolvePlaceholders());
+        Assert.Throws<FormatException>(() => parser.ResolvePlaceholders());
 
         configuration["target"] = "${obj}";
         var parsed = parser.ResolvePlaceholders();

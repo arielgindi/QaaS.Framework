@@ -119,39 +119,46 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// Resolves every <c>${...}</c> in the value at <paramref name="path"/>, recursing into
     /// referenced paths. Returns null if the path is gone (stale snapshot after a Copy).
     /// </summary>
-    private CachedConfigurationEntry? ResolvePlaceholderValue(string path)
+    private CachedConfigurationEntry? ResolvePlaceholderValue(string pathToResolve)
     {
-        if (!TryGetEntryAtPath(path, out var currentEntry)) return null;
-        if (!HasDirectValue(currentEntry)) return currentEntry;
+        // The path may be gone if another placeholder copied over its parent subtree.
+        if (!TryGetEntryAtPath(pathToResolve, out var entryToResolve)) return null;
+
+        // Object-only paths have no string value, so there is nothing to scan for ${...}.
+        if (!HasDirectValue(entryToResolve)) return entryToResolve;
 
         var nextScanIndex = 0;
-        while (TryGetValueAtPath(path, out var valueAtPath) && valueAtPath is not null)
+        while (TryGetValueAtPath(pathToResolve, out var currentValue) && currentValue is not null)
         {
-            if (TryParseNextPlaceholder(valueAtPath, nextScanIndex) is not { } placeholder) break;
+            if (TryParseNextPlaceholder(currentValue, nextScanIndex) is not { } placeholder) break;
 
+            // Missing references without defaults intentionally stay unresolved.
             if (!PathExists(placeholder.ReferencedPath))
             {
                 if (placeholder.DefaultValue is null) break;
-                if (!ApplyDefaultAndResolve(path, valueAtPath, placeholder)) break;
+                if (!ApplyDefaultAndResolve(pathToResolve, currentValue, placeholder)) break;
                 continue;
             }
 
-            var resolvedEntry = ResolveReferencedPath(path, placeholder);
-            if (resolvedEntry is null) break;
-            var referencedEntry = resolvedEntry.Value;
+            // Resolve the source first, so ${A}->${B}->value works before replacing ${A}.
+            var resolvedReference = ResolveReferencedPath(pathToResolve, placeholder);
+            if (resolvedReference is null) break;
+            var referencedEntry = resolvedReference.Value;
 
             if (!IsScalarEntry(referencedEntry))
             {
-                CopyObjectReference(path, valueAtPath, placeholder);
+                // Object references replace the destination subtree.
+                CopyObjectReference(pathToResolve, currentValue, placeholder);
                 break;
             }
 
+            // Scalar references can be inserted into the current string value.
             var replacement = referencedEntry.Value ?? string.Empty;
-            ReplaceScalarPlaceholder(path, valueAtPath, placeholder, replacement);
+            ReplaceScalarPlaceholder(pathToResolve, currentValue, placeholder, replacement);
             nextScanIndex = placeholder.StartIndex + replacement.Length;
         }
 
-        return GetEntryAtPath(path);
+        return GetEntryAtPath(pathToResolve);
     }
 
     /// <summary>
@@ -195,7 +202,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     {
         // Object references are only legal when ${X} is the whole value; they cannot be spliced into a string.
         if (IsPlaceholderEmbeddedInString(valueAtDestinationPath, placeholder))
-            throw new InvalidOperationException(
+            throw new FormatException(
                 $"Configuration placeholder at '{destinationPath}' references object '{placeholder.ReferencedPath}', " +
                 "but it is embedded inside a string.");
 
