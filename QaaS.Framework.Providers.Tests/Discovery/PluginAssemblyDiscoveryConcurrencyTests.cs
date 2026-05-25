@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using NUnit.Framework;
 using QaaS.Framework.Providers.Discovery;
+using QaaS.Framework.Providers.ObjectCreation;
 
 namespace QaaS.Framework.Providers.Tests.Discovery;
 
@@ -10,29 +11,28 @@ namespace QaaS.Framework.Providers.Tests.Discovery;
 [NonParallelizable]
 public class PluginAssemblyDiscoveryConcurrencyTests
 {
+    private static readonly Assembly ContractAnchorAssembly = typeof(IByNameObjectCreator).Assembly;
+
     [SetUp]
     [TearDown]
     public void ResetCache() => PluginAssemblyDiscovery.ResetCacheForTesting();
 
     [Test]
-    public void GetCandidateAssemblies_DoesNotExposeMutableBackingArray()
+    public void GetCandidateAssemblies_ReturnsReadOnlyCollection()
     {
-        var result = PluginAssemblyDiscovery.Discover(typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly, Mock.Of<ILogger>());
+        var result = PluginAssemblyDiscovery.Discover(ContractAnchorAssembly, Mock.Of<ILogger>());
 
-        Assert.That(
-            result,
-            Is.Not.InstanceOf<Assembly[]>(),
-            "Returning a bare Assembly[] lets callers mutate the cached state shared with concurrent readers.");
-        Assert.That(((System.Collections.IList)result).IsReadOnly, Is.True);
+        Assert.That(((System.Collections.IList)result).IsReadOnly, Is.True,
+            "Callers must not be able to mutate the cached list shared between threads.");
     }
 
     [Test]
     public async Task GetCandidateAssemblies_ConcurrentReadersObserveStableCachedResult()
     {
-        var first = PluginAssemblyDiscovery.Discover(typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly, Mock.Of<ILogger>());
+        var first = PluginAssemblyDiscovery.Discover(ContractAnchorAssembly, Mock.Of<ILogger>());
 
         var readers = Enumerable.Range(0, 16)
-            .Select(_ => Task.Run(() => PluginAssemblyDiscovery.Discover(typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly, Mock.Of<ILogger>())))
+            .Select(_ => Task.Run(() => PluginAssemblyDiscovery.Discover(ContractAnchorAssembly, Mock.Of<ILogger>())))
             .ToArray();
 
         var results = await Task.WhenAll(readers);

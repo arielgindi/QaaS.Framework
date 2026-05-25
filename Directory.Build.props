@@ -8,7 +8,7 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
 
-  <PropertyGroup>
+  <PropertyGroup Condition="'$(OutputType)' == 'Exe'">
     <PublishReadyToRun>true</PublishReadyToRun>
     <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
   </PropertyGroup>

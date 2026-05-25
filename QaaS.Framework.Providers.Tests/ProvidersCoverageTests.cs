@@ -57,17 +57,13 @@ public class ProvidersCoverageTests
         CurrentRunningSessions = new RunningSessions(new Dictionary<string, RunningSessionData<object, object>>())
     };
 
-    private static void OverrideProviderDiscoveryState(
+    private static void OverrideProviderHookAssemblies(
         HookProvider<IHook> provider,
-        Assembly[] hookAssemblies,
-        Type[] supportedHookTypes)
+        Assembly[] hookAssemblies)
     {
         typeof(HookProvider<IHook>)
             .GetField("_hookAssemblies", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(provider, hookAssemblies);
-        typeof(HookProvider<IHook>)
-            .GetField("_supportedHookTypes", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(provider, supportedHookTypes);
     }
 
     private static Type CreateDynamicHookType(string assemblyName, string fullTypeName)
@@ -138,7 +134,7 @@ public class ProvidersCoverageTests
         var firstType = CreateDynamicHookType("GeneratedHooks1", "Hooks.One.SharedHook");
         var secondType = CreateDynamicHookType("GeneratedHooks2", "Hooks.Two.SharedHook");
 
-        OverrideProviderDiscoveryState(provider, [firstType.Assembly, secondType.Assembly], [firstType, secondType]);
+        OverrideProviderHookAssemblies(provider, [firstType.Assembly, secondType.Assembly]);
 
         var resolvedHook = provider.GetSupportedInstanceByName("SharedHook");
 
@@ -159,7 +155,7 @@ public class ProvidersCoverageTests
         var provider = new HookProvider<IHook>(CreateContext(), new ByNameObjectCreator(NullLogger.Instance));
         var supportedType = CreateDynamicHookType("GeneratedHooks3", "Hooks.Three.SharedHook");
 
-        OverrideProviderDiscoveryState(provider, [supportedType.Assembly], [supportedType]);
+        OverrideProviderHookAssemblies(provider, [supportedType.Assembly]);
 
         var exception = Assert.Throws<ArgumentException>(() => provider.GetSupportedInstanceByName("MissingHook"));
 
@@ -229,7 +225,7 @@ public class ProvidersCoverageTests
         var firstType = CreateType("Hooks.Four.DuplicateHook");
         var secondType = CreateType("Hooks.Other.DuplicateHook");
 
-        OverrideProviderDiscoveryState(provider, [assemblyBuilder], [firstType, secondType]);
+        OverrideProviderHookAssemblies(provider, [assemblyBuilder]);
 
         var exception = Assert.Throws<ArgumentException>(() => provider.GetSupportedInstanceByName("DuplicateHook"));
 

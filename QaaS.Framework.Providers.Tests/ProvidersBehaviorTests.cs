@@ -54,17 +54,13 @@ public class ProvidersBehaviorTests
         CurrentRunningSessions = new RunningSessions(new Dictionary<string, RunningSessionData<object, object>>())
     };
 
-    private static void OverrideProviderDiscoveryState(
+    private static void OverrideProviderHookAssemblies(
         HookProvider<IHook> provider,
-        Assembly[] hookAssemblies,
-        Type[] supportedHookTypes)
+        Assembly[] hookAssemblies)
     {
         typeof(HookProvider<IHook>)
             .GetField("_hookAssemblies", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(provider, hookAssemblies);
-        typeof(HookProvider<IHook>)
-            .GetField("_supportedHookTypes", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(provider, supportedHookTypes);
     }
 
     private static Type CreateDynamicHookType(string assemblyName, string fullTypeName)
@@ -232,10 +228,8 @@ public class ProvidersBehaviorTests
         var firstType = CreateDynamicHookType("GeneratedHooksA", duplicateTypeName);
         var secondType = CreateDynamicHookType("GeneratedHooksB", duplicateTypeName);
 
-        OverrideProviderDiscoveryState(
-            provider,
-            [firstType.Assembly, secondType.Assembly],
-            [firstType, secondType]);
+        OverrideProviderHookAssemblies(
+            provider, [firstType.Assembly, secondType.Assembly]);
 
         var exception = Assert.Throws<ArgumentException>(() =>
             provider.GetSupportedInstanceByName(duplicateTypeName));

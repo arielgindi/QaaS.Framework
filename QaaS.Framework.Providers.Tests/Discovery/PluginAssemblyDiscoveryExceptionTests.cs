@@ -5,12 +5,15 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using NUnit.Framework;
 using QaaS.Framework.Providers.Discovery;
+using QaaS.Framework.Providers.ObjectCreation;
 
 namespace QaaS.Framework.Providers.Tests.Discovery;
 
 [TestFixture]
 public class PluginAssemblyDiscoveryExceptionTests
 {
+    private static readonly System.Reflection.Assembly ContractAnchorAssembly = typeof(IByNameObjectCreator).Assembly;
+
     private const string MissingPluginAssembly = "QaaS.Runner.Tests.OutOfMemoryProbe.Plugin";
 
     [SetUp]
@@ -19,7 +22,7 @@ public class PluginAssemblyDiscoveryExceptionTests
     [Test]
     public void Discover_WhenManifestAssemblyLoadThrowsOutOfMemoryException_PropagatesFatalException()
     {
-        var contractAnchor = typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly;
+        var contractAnchor = ContractAnchorAssembly;
         var contractAssemblyName = contractAnchor.GetName().Name!;
         var context = BuildContext(
             Library(contractAssemblyName),

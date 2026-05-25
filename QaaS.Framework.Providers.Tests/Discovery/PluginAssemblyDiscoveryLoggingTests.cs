@@ -3,12 +3,15 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using NUnit.Framework;
 using QaaS.Framework.Providers.Discovery;
+using QaaS.Framework.Providers.ObjectCreation;
 
 namespace QaaS.Framework.Providers.Tests.Discovery;
 
 [TestFixture]
 public class PluginAssemblyDiscoveryLoggingTests
 {
+    private static readonly System.Reflection.Assembly ContractAnchorAssembly = typeof(IByNameObjectCreator).Assembly;
+
     [SetUp]
     public void ResetCache() => PluginAssemblyDiscovery.ResetCacheForTesting();
 
@@ -17,11 +20,11 @@ public class PluginAssemblyDiscoveryLoggingTests
     {
         var context = BuildContext(Library("Some.Unrelated.Lib"));
         var logger = new Mock<ILogger>();
-        var contractAssemblyName = typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly.GetName().Name!;
+        var contractAssemblyName = ContractAnchorAssembly.GetName().Name!;
 
         PluginAssemblyDiscovery.FindCandidateAssemblies(
             context,
-            typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly,
+            ContractAnchorAssembly,
             logger.Object);
 
         logger.Verify(log => log.Log(

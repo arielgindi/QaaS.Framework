@@ -3,12 +3,15 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using NUnit.Framework;
 using QaaS.Framework.Providers.Discovery;
+using QaaS.Framework.Providers.ObjectCreation;
 
 namespace QaaS.Framework.Providers.Tests.Discovery;
 
 [TestFixture]
 public class PluginAssemblyDiscoveryTests
 {
+    private static readonly System.Reflection.Assembly ContractAnchorAssembly = typeof(IByNameObjectCreator).Assembly;
+
     private const string Contract = "Contract.Anchor";
 
     [SetUp]
@@ -19,13 +22,13 @@ public class PluginAssemblyDiscoveryTests
     {
         var (assemblies, fromManifest) = PluginAssemblyDiscovery.FindCandidateAssemblies(
             dependencyContext: null,
-            contractAnchor: typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly,
+            contractAnchor: ContractAnchorAssembly,
             logger: Mock.Of<ILogger>());
 
         Assert.That(fromManifest, Is.False);
         Assert.That(assemblies, Is.Not.Empty);
         Assert.That(
-            assemblies.Any(assembly => assembly == typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly),
+            assemblies.Any(assembly => assembly == ContractAnchorAssembly),
             Is.True);
     }
 
@@ -36,12 +39,12 @@ public class PluginAssemblyDiscoveryTests
 
         var (assemblies, fromManifest) = PluginAssemblyDiscovery.FindCandidateAssemblies(
             context,
-            typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly,
+            ContractAnchorAssembly,
             Mock.Of<ILogger>());
 
         Assert.That(fromManifest, Is.False);
         Assert.That(
-            assemblies.Any(assembly => assembly == typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly),
+            assemblies.Any(assembly => assembly == ContractAnchorAssembly),
             Is.True,
             "Fallback bin scan should still discover the contract assembly.");
     }
@@ -141,8 +144,8 @@ public class PluginAssemblyDiscoveryTests
     [Test]
     public void GetCandidateAssemblies_CachesSuccessfulManifestResults()
     {
-        var first = PluginAssemblyDiscovery.Discover(typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly, Mock.Of<ILogger>());
-        var second = PluginAssemblyDiscovery.Discover(typeof(QaaS.Framework.Providers.ObjectCreation.IByNameObjectCreator).Assembly, Mock.Of<ILogger>());
+        var first = PluginAssemblyDiscovery.Discover(ContractAnchorAssembly, Mock.Of<ILogger>());
+        var second = PluginAssemblyDiscovery.Discover(ContractAnchorAssembly, Mock.Of<ILogger>());
 
         Assert.That(second, Is.SameAs(first));
     }

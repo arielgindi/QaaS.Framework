@@ -16,30 +16,25 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     private readonly HashSet<string> _resolutionStack = new();
     private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _parentPaths = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _pathsContainingPlaceholders = [];
     private int _modificationCount;
-    private bool _configurationReplaced;
 
     /// <summary>
     /// Resolves all the placeholders in the configuration and returns the resolved configuration.
     /// </summary>
     public IConfiguration ResolvePlaceholders()
     {
-        var pathsContainingPlaceholders = RebuildPathIndexAndCollectPlaceholders();
+        RebuildPathIndexAndCollectPlaceholders();
 
         int modificationCountAtPassStart;
         do
         {
             modificationCountAtPassStart = _modificationCount;
-            foreach (var pathContainingPlaceholder in pathsContainingPlaceholders)
+            foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders)
             {
                 var currentValueAtPath = configuration[pathContainingPlaceholder];
                 if (currentValueAtPath is not null && currentValueAtPath.Contains(Prefix, StringComparison.Ordinal))
                     ResolvePlaceholderValue(pathContainingPlaceholder);
-            }
-            if (_configurationReplaced)
-            {
-                pathsContainingPlaceholders = RebuildPathIndexAndCollectPlaceholders();
-                _configurationReplaced = false;
             }
         } while (_modificationCount != modificationCountAtPassStart);
 
@@ -47,12 +42,11 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Single pass over the config tree: rebuilds the existing-path and parent-path indexes used
-    /// by <see cref="IsConfigurationSectionString"/> and <see cref="GetObjectFromConfiguration"/>,
-    /// and returns the leaf paths whose value contains a placeholder so the resolver can iterate
-    /// just those instead of the whole tree.
+    /// Single pass over the config tree: refreshes <see cref="_existingPaths"/>, <see cref="_parentPaths"/>,
+    /// and <see cref="_pathsContainingPlaceholders"/> so the outer resolver iterates only the
+    /// leaves that need resolution and answers path-existence questions in O(1).
     /// </summary>
-    private List<string> RebuildPathIndexAndCollectPlaceholders()
+    private void RebuildPathIndexAndCollectPlaceholders()
     {
         _existingPaths.Clear();
         _parentPaths.Clear();
@@ -70,7 +64,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             if (configurationEntry.Value is { } entryValue && entryValue.Contains(Prefix, StringComparison.Ordinal))
                 pathsContainingPlaceholders.Add(configurationEntry.Key);
         }
-        return pathsContainingPlaceholders;
+        _pathsContainingPlaceholders = pathsContainingPlaceholders;
     }
 
     private void SetValue(string path, string? value)
@@ -163,6 +157,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return currentSection;
     }
 
+    // A section is a "string leaf" when it has a value AND no descendants — i.e. its path
+    // is not an ancestor of any other key, tracked in _parentPaths by RebuildPathIndexAndCollectPlaceholders.
     private bool IsConfigurationSectionString(IConfigurationSection section)
     {
         return section.Value != null && !_parentPaths.Contains(section.Path);
@@ -189,13 +185,10 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         configKeys = configKeys.Concat(newConfigKeys).ToList();
         configuration = new ConfigurationBuilder().AddInMemoryCollection(configKeys).Build();
         _modificationCount++;
-        // Rebuild the path indices immediately so IsConfigurationSectionString and
-        // GetObjectFromConfiguration see the new tree for the remainder of this pass.
-        // Signal to the outer fixed-point loop that the placeholder snapshot is stale and
-        // must be re-collected before the next iteration; otherwise new placeholders that
-        // were copied along with the subtree would never get resolved.
-        _ = RebuildPathIndexAndCollectPlaceholders();
-        _configurationReplaced = true;
+        // The configuration tree was replaced. Rebuild the path indexes and the placeholder
+        // snapshot so the outer pass sees newly-copied paths (and the helpers operate on the
+        // new tree) starting with its next iteration.
+        RebuildPathIndexAndCollectPlaceholders();
     }
 
     private static int FindClosingBracket(string str, int startIndex)

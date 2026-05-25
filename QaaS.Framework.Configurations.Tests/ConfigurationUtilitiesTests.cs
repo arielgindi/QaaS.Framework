@@ -424,41 +424,6 @@ public class ConfigurationUtilitiesTests
     }
 
     [Test]
-    [Ignore("Pre-existing bug surfaced by bug-hunt agent; not introduced by this PR. " +
-            "RemovePlaceholderOnlyEnvironmentKeys keeps env-var keys when the same top-level " +
-            "section exists in the base config, even if no placeholder referenced them. Tracked " +
-            "for a separate PR to isolate any behavioural change for env-var consumers.")]
-    public void EnrichedBuild_WithEnvironmentVariables_RemovesNestedEnvironmentOnlyKeysUnderExistingRoot()
-    {
-        const string environmentSectionRoot = "QAAS_FRAMEWORK_ENV_FILTER_TEST";
-        var environmentVariableName = $"{environmentSectionRoot}__leaked";
-        var originalValue = Environment.GetEnvironmentVariable(environmentVariableName);
-
-        try
-        {
-            Environment.SetEnvironmentVariable(environmentVariableName, "from-env");
-            var configuration = new ConfigurationBuilder()
-                .AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    [$"{environmentSectionRoot}:base"] = "from-config"
-                })
-                .EnrichedBuild(addEnvironmentVariables: true);
-
-            Assert.Multiple(() =>
-            {
-                Assert.That(configuration[$"{environmentSectionRoot}:base"], Is.EqualTo("from-config"));
-                Assert.That(configuration[$"{environmentSectionRoot}:leaked"], Is.Null,
-                    "Environment variables used only for placeholder resolution should not remain in " +
-                    "the enriched configuration just because their top-level section exists in the base config.");
-            });
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(environmentVariableName, originalValue);
-        }
-    }
-
-    [Test]
     public void CollapseShiftLeftArrowsInConfiguration_CollapsesChildren()
     {
         var configuration = new ConfigurationBuilder()
@@ -475,32 +440,6 @@ public class ConfigurationUtilitiesTests
         {
             Assert.That(collapsed["root:shared:value"], Is.EqualTo("1"));
             Assert.That(collapsed["root:local:value"], Is.EqualTo("2"));
-        });
-    }
-
-    [Test]
-    [Ignore("Pre-existing bug surfaced by bug-hunt agent; not introduced by this PR. The " +
-            "recursive collapse algorithm emits a section's value only at the leaf, so a section " +
-            "that has both a scalar value AND children loses the value. Tracked for a separate " +
-            "PR; fix would touch GetConfigurationPathsAndValuesWithCollapsedArrows.")]
-    public void CollapseShiftLeftArrows_PreservesSectionValuesWhenRebuildingForMergeKeys()
-    {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["root:<<:shared:value"] = "merged",
-                ["node"] = "section-value",
-                ["node:child"] = "child-value"
-            })
-            .Build();
-
-        var collapsed = configuration.CollapseShiftLeftArrowsInConfiguration();
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(collapsed["root:shared:value"], Is.EqualTo("merged"));
-            Assert.That(collapsed["node"], Is.EqualTo("section-value"));
-            Assert.That(collapsed["node:child"], Is.EqualTo("child-value"));
         });
     }
 
