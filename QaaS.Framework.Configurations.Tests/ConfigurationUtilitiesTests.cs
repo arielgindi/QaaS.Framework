@@ -311,7 +311,7 @@ public class ConfigurationUtilitiesTests
             })
             .Build();
 
-        Assert.Throws<FormatException>(
+        Assert.Throws<InvalidOperationException>(
             () => new ConfigurationPlaceholderParser(configuration).ResolvePlaceholders());
     }
 
@@ -326,7 +326,7 @@ public class ConfigurationUtilitiesTests
             })
             .Build();
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<FormatException>(
             () => new ConfigurationPlaceholderParser(configuration).ResolvePlaceholders());
     }
 
