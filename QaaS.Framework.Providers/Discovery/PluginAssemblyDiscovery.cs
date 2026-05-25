@@ -5,10 +5,17 @@ using Microsoft.Extensions.Logging;
 namespace QaaS.Framework.Providers.Discovery;
 
 /// <summary>
-/// Resolves the assemblies that may contain plugin implementations of a given contract by combining
-/// loaded AppDomain assemblies, the manifest reverse-walk from the contract anchor, and a base-directory
-/// DLL scan. Deterministic results are cached per contract anchor for the process lifetime; only a
-/// transient failure inside the manifest walk bypasses the cache.
+/// Resolves the assemblies that may contain plugin implementations of a given contract.
+/// Walks <see cref="DependencyContext.Default"/> in reverse from the contract anchor and loads
+/// only the assemblies the manifest declares as candidates. Falls back to a base-directory DLL
+/// scan only when the manifest is unusable (single-file publish, native AOT, contract loaded
+/// dynamically, transient walk failure). The bin scan is deliberately fallback-only — antivirus
+/// scans every file open, and reading the PE header of every DLL beside the entry assembly on
+/// every startup is unacceptable for deployments with many unrelated DLLs. The contract is that
+/// plugins are NuGet packages or ProjectReferences so they appear in deps.json. Loose DLLs that
+/// are present in the bin folder but absent from the manifest are NOT discovered on the fast
+/// path. Deterministic results are cached per contract anchor; only a transient manifest-walk
+/// exception bypasses the cache.
 /// </summary>
 internal static class PluginAssemblyDiscovery
 {
@@ -43,9 +50,10 @@ internal static class PluginAssemblyDiscovery
         }
     }
 
-    // Builds the candidate set from AppDomain assemblies, the manifest reverse-walk (when usable),
-    // and a base-directory DLL scan. IsDeterministic is true unless an exception was caught during
-    // the manifest walk; the caller uses it to decide whether the result is safe to cache.
+    // Builds the candidate set from AppDomain assemblies and the manifest reverse-walk. Runs a
+    // base-directory DLL scan only when the manifest cannot be used (null context, contract
+    // absent, or walk threw). IsDeterministic is true unless the walk threw; the caller uses it
+    // to decide whether to cache.
     internal static (IReadOnlyList<Assembly> Assemblies, bool IsDeterministic) FindCandidateAssemblies(
         DependencyContext? dependencyContext,
         Assembly contractAnchor,
@@ -55,14 +63,24 @@ internal static class PluginAssemblyDiscovery
         var simpleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         SeedFromAppDomain(assembliesByFullName, simpleNames);
-        var isDeterministic = AddManifestReferencingAssemblies(
-            dependencyContext, contractAnchor, assembliesByFullName, simpleNames, logger);
-        AddBaseDirectoryAssemblies(assembliesByFullName, simpleNames, logger);
 
-        return ([.. assembliesByFullName.Values], isDeterministic);
+        var outcome = TryAddManifestReferencingAssemblies(
+            dependencyContext, contractAnchor, assembliesByFullName, simpleNames, logger);
+
+        if (outcome != ManifestWalkOutcome.Succeeded)
+            AddBaseDirectoryAssemblies(assembliesByFullName, simpleNames, logger);
+
+        return ([.. assembliesByFullName.Values], outcome != ManifestWalkOutcome.TransientFailure);
     }
 
-    private static bool AddManifestReferencingAssemblies(
+    private enum ManifestWalkOutcome
+    {
+        Succeeded,
+        NotUsable,
+        TransientFailure,
+    }
+
+    private static ManifestWalkOutcome TryAddManifestReferencingAssemblies(
         DependencyContext? dependencyContext,
         Assembly contractAnchor,
         Dictionary<string, Assembly> assembliesByFullName,
@@ -73,17 +91,17 @@ internal static class PluginAssemblyDiscovery
         if (string.IsNullOrEmpty(contractName))
         {
             logger.LogDebug(
-                "Plugin discovery skipping manifest walk: contract anchor has no simple name. {ContractAssembly}",
+                "Plugin discovery falling back to bin scan: contract anchor has no simple name. {ContractAssembly}",
                 contractAnchor.FullName);
-            return true;
+            return ManifestWalkOutcome.NotUsable;
         }
 
         if (dependencyContext is null)
         {
             logger.LogDebug(
-                "Plugin discovery skipping manifest walk: DependencyContext.Default is unavailable for {ContractAssembly}.",
+                "Plugin discovery falling back to bin scan: DependencyContext.Default is unavailable for {ContractAssembly}.",
                 contractName);
-            return true;
+            return ManifestWalkOutcome.NotUsable;
         }
 
         IReadOnlySet<string> referencingAssemblyNames;
@@ -93,16 +111,16 @@ internal static class PluginAssemblyDiscovery
         }
         catch (Exception exception) when (!IsFatalException(exception))
         {
-            logger.LogWarning(exception, "Reverse-dependency walk failed; relying on AppDomain and base-directory scan.");
-            return false;
+            logger.LogWarning(exception, "Reverse-dependency walk failed; falling back to bin scan.");
+            return ManifestWalkOutcome.TransientFailure;
         }
 
         if (referencingAssemblyNames.Count == 0)
         {
             logger.LogDebug(
-                "Plugin discovery skipping manifest walk: contract assembly {ContractAssembly} not present in dependency manifest.",
+                "Plugin discovery falling back to bin scan: contract assembly {ContractAssembly} not present in dependency manifest.",
                 contractName);
-            return true;
+            return ManifestWalkOutcome.NotUsable;
         }
 
         foreach (var assemblyName in referencingAssemblyNames)
@@ -122,7 +140,7 @@ internal static class PluginAssemblyDiscovery
             }
         }
 
-        return true;
+        return ManifestWalkOutcome.Succeeded;
     }
 
     // Walks the dependency graph in reverse from every library that ships contractAssemblyName and
