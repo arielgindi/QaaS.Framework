@@ -8,7 +8,6 @@ namespace QaaS.Framework.Configurations;
 public class ConfigurationPlaceholderParser(IConfiguration configuration)
 {
     private const string PlaceholderStart = "${";
-    private const string PlaceholderEnd = "}";
     private const string NullSeparator = "??";
     private const char OpenCurlyBracket = '{';
     private const char CloseCurlyBracket = '}';
