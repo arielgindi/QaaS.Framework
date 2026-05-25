@@ -41,11 +41,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         return configuration;
     }
 
-    /// <summary>
-    /// Single pass over the config tree: refreshes <see cref="_existingPaths"/>, <see cref="_parentPaths"/>,
-    /// and <see cref="_pathsContainingPlaceholders"/> so the outer resolver iterates only the
-    /// leaves that need resolution and answers path-existence questions in O(1).
-    /// </summary>
+    // Single pass over the config tree: refreshes the path-index sets and the placeholder snapshot so
+    // the outer resolver iterates only the leaves that need work and path-existence checks stay O(1).
     private void RebuildPathIndexAndCollectPlaceholders()
     {
         _existingPaths.Clear();

@@ -5,14 +5,9 @@ using Microsoft.Extensions.Logging;
 namespace QaaS.Framework.Providers.Discovery;
 
 /// <summary>
-/// Resolves the assemblies that may contain plugin implementations of a given contract.
-/// Combines three sources, deduplicated by assembly full name:
-/// (1) every assembly already loaded into the current AppDomain,
-/// (2) every assembly that transitively depends on the contract anchor in <see cref="DependencyContext.Default"/>,
-/// (3) every loose <c>*.dll</c> found beside the entry assembly (so plugins copied into the bin folder
-///     but absent from the dependency manifest are still discovered).
-/// Results are cached per contract anchor for the process lifetime, but only when the manifest walk
-/// contributed, so a transient manifest failure cannot poison the cache.
+/// Resolves the assemblies that may contain plugin implementations of a given contract by combining
+/// loaded AppDomain assemblies, the manifest reverse-walk from the contract anchor, and a base-directory
+/// DLL scan. Successful results are cached per contract anchor for the process lifetime.
 /// </summary>
 public static class PluginAssemblyDiscovery
 {
@@ -31,17 +26,17 @@ public static class PluginAssemblyDiscovery
         ArgumentNullException.ThrowIfNull(contractAnchor);
         ArgumentNullException.ThrowIfNull(logger);
 
-        var cacheKey = contractAnchor.FullName ?? contractAnchor.GetName().Name ?? string.Empty;
+        var cacheKey = contractAnchor.FullName ?? contractAnchor.GetName().Name;
 
         lock (DiscoveryLock)
         {
-            if (!string.IsNullOrEmpty(cacheKey) && CachedDiscoveryResults.TryGetValue(cacheKey, out var cached))
+            if (cacheKey is not null && CachedDiscoveryResults.TryGetValue(cacheKey, out var cached))
                 return cached;
 
             var (assemblies, fromManifest) =
                 FindCandidateAssemblies(DependencyContext.Default, contractAnchor, logger);
 
-            if (fromManifest && !string.IsNullOrEmpty(cacheKey))
+            if (fromManifest && cacheKey is not null)
                 CachedDiscoveryResults[cacheKey] = assemblies;
 
             return assemblies;
