@@ -26,24 +26,24 @@ internal static class PluginAssemblyDiscovery
 
         lock (DiscoveryLock)
         {
-            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var cached))
-                return cached;
+            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var cachedAssemblies))
+                return cachedAssemblies;
         }
 
-        var (assemblies, isDeterministic) =
+        var (discoveredAssemblies, isDeterministic) =
             FindCandidateAssemblies(DependencyContext.Default, contractAnchor, logger);
 
         if (!isDeterministic)
-            return assemblies;
+            return discoveredAssemblies;
 
         lock (DiscoveryLock)
         {
             // Another caller may have raced ahead and stored its own list; return that one so every
             // concurrent first-caller observes a single shared instance.
-            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var raceWinner))
-                return raceWinner;
-            CachedDiscoveryResults[contractAnchor] = assemblies;
-            return assemblies;
+            if (CachedDiscoveryResults.TryGetValue(contractAnchor, out var raceWinnerAssemblies))
+                return raceWinnerAssemblies;
+            CachedDiscoveryResults[contractAnchor] = discoveredAssemblies;
+            return discoveredAssemblies;
         }
     }
 
@@ -59,13 +59,13 @@ internal static class PluginAssemblyDiscovery
 
         SeedFromAppDomain(assembliesByFullName, simpleNames);
 
-        var outcome = TryAddManifestReferencingAssemblies(
+        var manifestOutcome = TryAddManifestReferencingAssemblies(
             dependencyContext, contractAnchor, assembliesByFullName, simpleNames, logger);
 
-        if (outcome != ManifestWalkOutcome.Succeeded)
+        if (manifestOutcome != ManifestWalkOutcome.Succeeded)
             AddBaseDirectoryAssemblies(assembliesByFullName, simpleNames, logger);
 
-        return ([.. assembliesByFullName.Values], outcome != ManifestWalkOutcome.TransientFailure);
+        return ([.. assembliesByFullName.Values], manifestOutcome != ManifestWalkOutcome.TransientFailure);
     }
 
     private enum ManifestWalkOutcome

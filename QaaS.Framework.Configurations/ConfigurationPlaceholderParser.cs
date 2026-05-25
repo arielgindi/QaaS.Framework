@@ -36,11 +36,11 @@ public class ConfigurationPlaceholderParser
         do
         {
             modificationCountAtPassStart = _modificationCount;
-            foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders.ToArray())
+            foreach (var placeholderPath in _pathsContainingPlaceholders.ToArray())
             {
-                var currentValueAtPath = _configuration[pathContainingPlaceholder];
-                if (currentValueAtPath is not null && currentValueAtPath.Contains(PlaceholderStart, StringComparison.Ordinal))
-                    ResolvePlaceholderValue(pathContainingPlaceholder);
+                var currentValue = _configuration[placeholderPath];
+                if (currentValue is not null && currentValue.Contains(PlaceholderStart, StringComparison.Ordinal))
+                    ResolvePlaceholderValue(placeholderPath);
             }
         } while (_modificationCount != modificationCountAtPassStart);
 
@@ -79,11 +79,11 @@ public class ConfigurationPlaceholderParser
     {
         var currentSection = GetSectionAtPath(path);
         if (currentSection is null || !IsStringLeaf(currentSection)) return currentSection;
-        var lastEnd = 0;
+        var nextScanIndex = 0;
 
         while (currentSection.Value is { } sectionValue)
         {
-            var placeholderStartIndex = sectionValue.IndexOf(PlaceholderStart, lastEnd, StringComparison.Ordinal);
+            var placeholderStartIndex = sectionValue.IndexOf(PlaceholderStart, nextScanIndex, StringComparison.Ordinal);
             if (placeholderStartIndex is -1) break;
 
             var placeholderEndIndex = FindClosingBracket(sectionValue, placeholderStartIndex + 2);
@@ -132,7 +132,7 @@ public class ConfigurationPlaceholderParser
 
                     sectionValue = sectionValue.Substring(0, placeholderStartIndex) + resolvedSection.Value + sectionValue.Substring(placeholderEndIndex + 1);
                     SetValue(path, sectionValue);
-                    lastEnd = placeholderStartIndex + resolvedSection.Value!.Length; // Value is non-null because IsStringLeaf returned true.
+                    nextScanIndex = placeholderStartIndex + resolvedSection.Value!.Length; // Value is non-null because IsStringLeaf returned true.
                 }
                 finally
                 {
@@ -159,21 +159,21 @@ public class ConfigurationPlaceholderParser
     private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
     {
         var allEntries = _configuration.AsEnumerable().ToList();
-        var removedConfigKeys = allEntries
-            .Where(kvp => IsPathOrDescendant(kvp.Key, destinationPath))
+        var removedEntries = allEntries
+            .Where(entry => IsPathOrDescendant(entry.Key, destinationPath))
             .ToList();
-        var preservedConfigKeys = allEntries
-            .Where(kvp => !IsPathOrDescendant(kvp.Key, destinationPath))
+        var preservedEntries = allEntries
+            .Where(entry => !IsPathOrDescendant(entry.Key, destinationPath))
             .ToList();
-        var newConfigKeys = preservedConfigKeys
-            .Where(kvp => IsPathOrDescendant(kvp.Key, sourcePath))
-            .Select(kvp => new KeyValuePair<string, string?>(RebasePathPrefix(kvp.Key, sourcePath, destinationPath), kvp.Value))
+        var addedEntries = preservedEntries
+            .Where(entry => IsPathOrDescendant(entry.Key, sourcePath))
+            .Select(entry => new KeyValuePair<string, string?>(RebasePathPrefix(entry.Key, sourcePath, destinationPath), entry.Value))
             .ToList();
-        _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedConfigKeys.Concat(newConfigKeys)).Build();
-        foreach (var removedConfigKey in removedConfigKeys)
-            RemovePathFromIndex(removedConfigKey.Key);
-        foreach (var newConfigKey in newConfigKeys)
-            AddPathToIndex(newConfigKey.Key, newConfigKey.Value);
+        _configuration = new ConfigurationBuilder().AddInMemoryCollection(preservedEntries.Concat(addedEntries)).Build();
+        foreach (var removedEntry in removedEntries)
+            RemovePathFromIndex(removedEntry.Key);
+        foreach (var addedEntry in addedEntries)
+            AddPathToIndex(addedEntry.Key, addedEntry.Value);
         _modificationCount++;
     }
 

@@ -88,9 +88,9 @@ public class HookProvider<THook> : IHookProvider<THook> where THook : IHook
 
     private Type ResolveSupportedHookType(string instanceName)
     {
-        var isExactTypeName = instanceName.Contains('.', StringComparison.Ordinal) ||
+        var isQualifiedTypeName = instanceName.Contains('.', StringComparison.Ordinal) ||
                               instanceName.Contains(',', StringComparison.Ordinal);
-        if (isExactTypeName)
+        if (isQualifiedTypeName)
         {
             Type? fullNameMatch = null;
             foreach (var hookAssembly in _hookAssemblies)
