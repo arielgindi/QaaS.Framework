@@ -15,11 +15,12 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private static readonly char PathSeparatorChar = ConfigurationConstants.PathSeparator[0];
 
-    private readonly HashSet<string> _activeResolutionPaths = [];
-    private readonly HashSet<string> _existingPaths = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string?> _configurationEntries = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, int> _parentPathRefcounts = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _pathsContainingPlaceholders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _activeResolutionPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string?> _entriesByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<CachedConfigurationEntry>> _sourceSubtreesByPath =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _descendantCountByParentPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _placeholderPaths = new(StringComparer.OrdinalIgnoreCase);
     private IConfiguration _configuration = configuration;
     private int _modificationCount;
 
@@ -28,61 +29,75 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// </summary>
     public IConfiguration ResolvePlaceholders()
     {
-        RebuildPathIndexAndCollectPlaceholders();
+        RebuildEntryCacheAndIndexes();
 
-        int modificationCountAtPassStart;
-        do
+        var modificationCountAtResolveStart = _modificationCount;
+        try
         {
-            modificationCountAtPassStart = _modificationCount;
-
-            // Snapshot — ResolvePlaceholderValue can mutate _pathsContainingPlaceholders mid-iteration.
-            foreach (var placeholderPath in _pathsContainingPlaceholders.ToArray())
-            {
-                var valueAtPlaceholderPath = _configuration[placeholderPath];
-                
-                if (valueAtPlaceholderPath is not null && valueAtPlaceholderPath.Contains(PlaceholderStart, StringComparison.Ordinal))
-                {
-                    // It may already be resolved indirectly while resolving another placeholder.
-                    ResolvePlaceholderValue(placeholderPath);
-                }
-            }
-        } while (_modificationCount != modificationCountAtPassStart);
+            ResolvePlaceholderPathsUntilStable();
+        }
+        finally
+        {
+            if (_modificationCount != modificationCountAtResolveStart)
+                RebuildConfigurationFromEntries();
+        }
 
         return _configuration;
     }
 
     /// <summary>
-    /// One-time O(N) index population; per-Copy updates are incremental.
+    /// One-time O(N) cache/index population; later writes and copies update those structures incrementally.
     /// </summary>
-    private void RebuildPathIndexAndCollectPlaceholders()
+    private void RebuildEntryCacheAndIndexes()
     {
-        _existingPaths.Clear();
-        _configurationEntries.Clear();
-        _parentPathRefcounts.Clear();
-        _pathsContainingPlaceholders.Clear();
+        _entriesByPath.Clear();
+        _sourceSubtreesByPath.Clear();
+        _descendantCountByParentPath.Clear();
+        _placeholderPaths.Clear();
 
         // Walks the whole configuration tree as flattened paths, including deep YAML parents and leaves.
         foreach (var configurationEntry in _configuration.AsEnumerable())
         {
-            _configurationEntries[configurationEntry.Key] = configurationEntry.Value;
-
-            if (_existingPaths.Add(configurationEntry.Key))
-                UpdateParentRefcounts(configurationEntry.Key, delta: +1);
-
-            // If the value contains "${", remember this path for resolving later
-            if (configurationEntry.Value is { } entryValue && entryValue.Contains(PlaceholderStart, StringComparison.Ordinal))
-                _pathsContainingPlaceholders.Add(configurationEntry.Key);
+            SetEntry(configurationEntry.Key, configurationEntry.Value);
         }
     }
+
+    private void ResolvePlaceholderPathsUntilStable()
+    {
+        int modificationCountAtPassStart;
+        do
+        {
+            modificationCountAtPassStart = _modificationCount;
+            ResolveCurrentPlaceholderPathSnapshot();
+        } while (_modificationCount != modificationCountAtPassStart);
+    }
+
+    private void ResolveCurrentPlaceholderPathSnapshot()
+    {
+        // ResolvePlaceholderValue can mutate _placeholderPaths mid-iteration.
+        foreach (var placeholderPath in _placeholderPaths.ToArray())
+        {
+            if (!PathValueContainsPlaceholder(placeholderPath))
+                continue;
+
+            // It may already be resolved indirectly while resolving another placeholder.
+            ResolvePlaceholderValue(placeholderPath);
+        }
+    }
+
+    private bool PathValueContainsPlaceholder(string path) =>
+        TryGetValueAtPath(path, out var value) && ValueContainsPlaceholder(value);
+
+    private static bool ValueContainsPlaceholder(string? value) =>
+        value?.Contains(PlaceholderStart, StringComparison.Ordinal) == true;
 
     /// <summary>
     /// Writes a scalar value, syncs the placeholder index, bumps the modification counter.
     /// </summary>
     private void WriteValueAt(string path, string? value)
     {
-        _configurationEntries[path] = value;
-        _configuration[path] = value;
-        RefreshPlaceholderMembership(path, value);
+        SetEntry(path, value);
+        InvalidateSourceSubtreeCache(path);
         _modificationCount++;
     }
 
@@ -90,145 +105,236 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// Resolves every <c>${...}</c> in the value at <paramref name="path"/>, recursing into
     /// referenced paths. Returns null if the path is gone (stale snapshot after a Copy).
     /// </summary>
-    private IConfigurationSection? ResolvePlaceholderValue(string path)
+    private CachedConfigurationEntry? ResolvePlaceholderValue(string path)
     {
-        var currentSection = GetSectionAtPath(path);
-        if (currentSection is null || !IsStringLeaf(currentSection)) return currentSection;
+        if (!TryGetEntryAtPath(path, out var currentEntry)) return null;
+        if (!HasDirectValue(currentEntry)) return currentEntry;
 
         var nextScanIndex = 0;
-        while (currentSection.Value is { } sectionValue)
+        while (TryGetValueAtPath(path, out var valueAtPath) && valueAtPath is not null)
         {
-            if (TryParseNextPlaceholder(sectionValue, nextScanIndex) is not { } placeholder) break;
+            if (TryParseNextPlaceholder(valueAtPath, nextScanIndex) is not { } placeholder) break;
 
-            // Get the config path that ${...} points to
-            var referencedSection = GetSectionAtPath(placeholder.ReferencedPath);
-            if (referencedSection is null && placeholder.DefaultValue is null) break;
-
-            if (referencedSection is null)
+            if (!PathExists(placeholder.ReferencedPath))
             {
-                // Missing source with a default: splice the default in and recurse for nested placeholders.
-                string sectionValueWithDefaultApplied = SpliceReplacementIntoValue(sectionValue, placeholder, placeholder.DefaultValue);
-                WriteValueAt(path, sectionValueWithDefaultApplied);
-                currentSection = ResolvePlaceholderValue(path);
-                if (currentSection is null) break;
+                if (placeholder.DefaultValue is null) break;
+                if (!ApplyDefaultAndResolve(path, valueAtPath, placeholder)) break;
                 continue;
             }
 
-            if (!_activeResolutionPaths.Add(placeholder.ReferencedPath))
+            var resolvedEntry = ResolveReferencedPath(path, placeholder);
+            if (resolvedEntry is null) break;
+            var referencedEntry = resolvedEntry.Value;
+
+            if (!IsScalarEntry(referencedEntry))
             {
-                throw new InvalidOperationException(
-                    $"Configuration placeholder loop found: '{path}' refers back to '{placeholder.ReferencedPath}'. " +
-                    "Check the YAML placeholders that reference each other.");
+                CopyObjectReference(path, valueAtPath, placeholder);
+                break;
             }
 
-            // try/finally so an exception during recursion doesn't leave the path stuck on the stack.
-            try
-            {
-                var resolvedSection = ResolvePlaceholderValue(placeholder.ReferencedPath);
-                if (resolvedSection is null) break;
-
-                if (!IsStringLeaf(resolvedSection))
-                {
-                    // Object references are only legal when ${X} is the whole value — can't splice an object into a string.
-                    if (IsPlaceholderEmbeddedInString(sectionValue, placeholder))
-                        throw new InvalidOperationException("Placeholder reference to an object but is a substring value at: " + path);
-
-                    CopyConfigurationsByPath(placeholder.ReferencedPath, path);
-                    currentSection = resolvedSection;
-                    break;
-                }
-
-                var replacement = resolvedSection.Value ?? string.Empty;
-                sectionValue = SpliceReplacementIntoValue(sectionValue, placeholder, replacement);
-                WriteValueAt(path, sectionValue);
-                nextScanIndex = placeholder.StartIndex + replacement.Length;
-            }
-            finally
-            {
-                _activeResolutionPaths.Remove(placeholder.ReferencedPath);
-            }
+            var replacement = referencedEntry.Value ?? string.Empty;
+            ReplaceScalarPlaceholder(path, valueAtPath, placeholder, replacement);
+            nextScanIndex = placeholder.StartIndex + replacement.Length;
         }
 
-        return currentSection;
+        return GetEntryAtPath(path);
     }
 
-    /// <summary>
-    /// True when the section has a value and no descendants.
-    /// </summary>
-    private bool IsStringLeaf(IConfigurationSection section) =>
-        section.Value != null && !_parentPathRefcounts.ContainsKey(section.Path);
-
-    private IConfigurationSection? GetSectionAtPath(string path) =>
-        _existingPaths.Contains(path) ? _configuration.GetSection(path) : null;
-
-    /// <summary>
-    /// Replaces the destination subtree with the source subtree using the cached flattened entries.
-    /// </summary>
-    private void CopyConfigurationsByPath(string sourcePath, string destinationPath)
+    private bool ApplyDefaultAndResolve(string path, string valueAtPath, ParsedPlaceholder placeholder)
     {
-        var removedEntries = _configurationEntries
-            .Where(entry => IsPathOrDescendant(entry.Key, destinationPath))
-            .ToList();
-        var addedEntries = _configurationEntries
-            .Where(entry => !IsPathOrDescendant(entry.Key, destinationPath) &&
-                            IsPathOrDescendant(entry.Key, sourcePath))
-            .Select(entry => new KeyValuePair<string, string?>(RebasePathPrefix(entry.Key, sourcePath, destinationPath), entry.Value))
+        var valueWithDefaultApplied = SpliceReplacementIntoValue(
+            valueAtPath,
+            placeholder,
+            placeholder.DefaultValue);
+
+        WriteValueAt(path, valueWithDefaultApplied);
+        return ResolvePlaceholderValue(path) is not null;
+    }
+
+    private CachedConfigurationEntry? ResolveReferencedPath(string path, ParsedPlaceholder placeholder)
+    {
+        if (!_activeResolutionPaths.Add(placeholder.ReferencedPath))
+            throw CreateCircularReferenceException(path, placeholder.ReferencedPath);
+
+        try
+        {
+            return ResolvePlaceholderValue(placeholder.ReferencedPath);
+        }
+        finally
+        {
+            _activeResolutionPaths.Remove(placeholder.ReferencedPath);
+        }
+    }
+
+    private void CopyObjectReference(string destinationPath, string valueAtDestinationPath, ParsedPlaceholder placeholder)
+    {
+        // Object references are only legal when ${X} is the whole value; they cannot be spliced into a string.
+        if (IsPlaceholderEmbeddedInString(valueAtDestinationPath, placeholder))
+            throw new InvalidOperationException(
+                $"Configuration placeholder at '{destinationPath}' references object '{placeholder.ReferencedPath}', " +
+                "but it is embedded inside a string.");
+
+        CopySubtreeByPath(placeholder.ReferencedPath, destinationPath);
+    }
+
+    private void ReplaceScalarPlaceholder(
+        string path,
+        string valueAtPath,
+        ParsedPlaceholder placeholder,
+        string replacement)
+    {
+        var resolvedValue = SpliceReplacementIntoValue(valueAtPath, placeholder, replacement);
+        WriteValueAt(path, resolvedValue);
+    }
+
+    private static InvalidOperationException CreateCircularReferenceException(string path, string referencedPath) =>
+        new(
+            $"Configuration placeholder loop found: '{path}' refers back to '{referencedPath}'. " +
+            "Check the YAML placeholders that reference each other.");
+
+    /// <summary>
+    /// True when the cached entry has a value and no descendants.
+    /// </summary>
+    private bool IsScalarEntry(CachedConfigurationEntry entry) =>
+        entry.Value != null && !HasDescendants(entry.Path);
+
+    private static bool HasDirectValue(CachedConfigurationEntry entry) =>
+        entry.Value != null;
+
+    private bool HasDescendants(string path) =>
+        _descendantCountByParentPath.ContainsKey(path);
+
+    private CachedConfigurationEntry? GetEntryAtPath(string path) =>
+        TryGetEntryAtPath(path, out var entry) ? entry : null;
+
+    private bool PathExists(string path) =>
+        _entriesByPath.ContainsKey(path);
+
+    private bool TryGetEntryAtPath(string path, out CachedConfigurationEntry entry)
+    {
+        if (_entriesByPath.TryGetValue(path, out var value))
+        {
+            entry = new CachedConfigurationEntry(path, value);
+            return true;
+        }
+
+        entry = default;
+        return false;
+    }
+
+    private bool TryGetValueAtPath(string path, out string? value) =>
+        _entriesByPath.TryGetValue(path, out value);
+
+    /// <summary>
+    /// Replaces the destination subtree in the cached entries; the IConfiguration rebuild is delayed.
+    /// </summary>
+    private void CopySubtreeByPath(string sourcePath, string destinationPath)
+    {
+        var removedEntries = GetDestinationEntriesToRemove(destinationPath);
+        var addedEntries = GetSourceSubtreeEntries(sourcePath)
+            .Where(entry => !IsPathOrDescendant(entry.Path, destinationPath))
+            .Select(entry => RebaseEntry(entry, sourcePath, destinationPath))
             .ToList();
 
         foreach (var removedEntry in removedEntries)
-            _configurationEntries.Remove(removedEntry.Key);
+            RemoveEntry(removedEntry.Path);
         foreach (var addedEntry in addedEntries)
-            _configurationEntries[addedEntry.Key] = addedEntry.Value;
-
-        _configuration = new ConfigurationBuilder().AddInMemoryCollection(_configurationEntries).Build();
-
-        foreach (var removedEntry in removedEntries)
-            RemovePathFromIndex(removedEntry.Key);
-        foreach (var addedEntry in addedEntries)
-            AddPathToIndex(addedEntry.Key, addedEntry.Value);
+            SetEntry(addedEntry.Path, addedEntry.Value);
+        InvalidateSourceSubtreeCache(destinationPath);
         _modificationCount++;
     }
 
-    private void AddPathToIndex(string path, string? value)
+    private List<CachedConfigurationEntry> GetDestinationEntriesToRemove(string destinationPath)
     {
-        if (_existingPaths.Add(path))
-            UpdateParentRefcounts(path, delta: +1);
+        if (HasDescendants(destinationPath))
+        {
+            return _entriesByPath
+                .Where(entry => IsPathOrDescendant(entry.Key, destinationPath))
+                .Select(entry => new CachedConfigurationEntry(entry.Key, entry.Value))
+                .ToList();
+        }
+
+        return _entriesByPath.TryGetValue(destinationPath, out var value)
+            ? [new CachedConfigurationEntry(destinationPath, value)]
+            : [];
+    }
+
+    private List<CachedConfigurationEntry> GetSourceSubtreeEntries(string sourcePath)
+    {
+        if (_sourceSubtreesByPath.TryGetValue(sourcePath, out var cachedEntries))
+            return cachedEntries;
+
+        var sourceEntries = _entriesByPath
+            .Where(entry => IsPathOrDescendant(entry.Key, sourcePath))
+            .Select(entry => new CachedConfigurationEntry(entry.Key, entry.Value))
+            .ToList();
+        _sourceSubtreesByPath[sourcePath] = sourceEntries;
+        return sourceEntries;
+    }
+
+    private void InvalidateSourceSubtreeCache(string changedPath)
+    {
+        var staleSourcePaths = _sourceSubtreesByPath.Keys
+            .Where(sourcePath => SourceSubtreeCacheOverlapsChange(sourcePath, changedPath))
+            .ToArray();
+
+        foreach (var cachedSourcePath in staleSourcePaths)
+            _sourceSubtreesByPath.Remove(cachedSourcePath);
+    }
+
+    private static bool SourceSubtreeCacheOverlapsChange(string sourcePath, string changedPath) =>
+        IsPathOrDescendant(changedPath, sourcePath) || IsPathOrDescendant(sourcePath, changedPath);
+
+    private void RebuildConfigurationFromEntries() =>
+        _configuration = new ConfigurationBuilder().AddInMemoryCollection(_entriesByPath).Build();
+
+    private void SetEntry(string path, string? value)
+    {
+        if (_entriesByPath.TryAdd(path, value))
+        {
+            UpdateAncestorDescendantCounts(path, delta: +1);
+        }
+        else
+        {
+            _entriesByPath[path] = value;
+        }
+
         RefreshPlaceholderMembership(path, value);
     }
 
-    private void RemovePathFromIndex(string path)
+    private void RemoveEntry(string path)
     {
-        if (_existingPaths.Remove(path))
-            UpdateParentRefcounts(path, delta: -1);
-        _pathsContainingPlaceholders.Remove(path);
+        if (_entriesByPath.Remove(path))
+            UpdateAncestorDescendantCounts(path, delta: -1);
+        _placeholderPaths.Remove(path);
     }
 
     private void RefreshPlaceholderMembership(string path, string? value)
     {
-        if (value is not null && value.Contains(PlaceholderStart, StringComparison.Ordinal))
-            _pathsContainingPlaceholders.Add(path);
+        if (ValueContainsPlaceholder(value))
+            _placeholderPaths.Add(path);
         else
-            _pathsContainingPlaceholders.Remove(path);
+            _placeholderPaths.Remove(path);
     }
 
     /// <summary>
-    /// Walks ancestors and adjusts each one's refcount by <paramref name="delta"/>.
+    /// Walks ancestors and adjusts each one's descendant count by <paramref name="delta"/>.
     /// The 0→1 transition marks an ancestor as a parent; the 1→0 transition drops it.
     /// </summary>
-    private void UpdateParentRefcounts(string path, int delta)
+    private void UpdateAncestorDescendantCounts(string path, int delta)
     {
         var ancestorPath = path;
         int lastPathSeparatorIndex;
         while ((lastPathSeparatorIndex = ancestorPath.LastIndexOf(PathSeparatorChar)) > 0)
         {
             ancestorPath = ancestorPath[..lastPathSeparatorIndex];
-            var nextCount = _parentPathRefcounts.GetValueOrDefault(ancestorPath) + delta;
+            var nextCount = _descendantCountByParentPath.GetValueOrDefault(ancestorPath) + delta;
 
             // Remove only on 1->0; other descendants may still keep this parent alive.
             if (nextCount == 0)
-                _parentPathRefcounts.Remove(ancestorPath);
+                _descendantCountByParentPath.Remove(ancestorPath);
             else
-                _parentPathRefcounts[ancestorPath] = nextCount;
+                _descendantCountByParentPath[ancestorPath] = nextCount;
         }
     }
 
@@ -255,8 +361,13 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
     /// <summary>
     /// Replaces the parsed placeholder span with the replacement while preserving surrounding text.
     /// </summary>
-    private static string SpliceReplacementIntoValue(string sectionValue, ParsedPlaceholder placeholder, string? replacement) =>
-        sectionValue.Substring(0, placeholder.StartIndex) + replacement + sectionValue.Substring(placeholder.EndIndex + 1);
+    private static string SpliceReplacementIntoValue(
+        string sectionValue,
+        ParsedPlaceholder placeholder,
+        string? replacement) =>
+        sectionValue.Substring(0, placeholder.StartIndex) +
+        replacement +
+        sectionValue.Substring(placeholder.EndIndex + 1);
 
     /// <summary>
     /// True when there is any text or whitespace before or after the placeholder.
@@ -270,6 +381,12 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private static string RebasePathPrefix(string path, string sourcePath, string destinationPath) =>
         path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
+
+    private static CachedConfigurationEntry RebaseEntry(
+        CachedConfigurationEntry entry,
+        string sourcePath,
+        string destinationPath) =>
+        new(RebasePathPrefix(entry.Path, sourcePath, destinationPath), entry.Value);
 
     /// <summary>
     /// Finds the matching <c>}</c> for the <c>${</c> at <paramref name="startIndex"/> - 2, tracking nested depth.
@@ -292,4 +409,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         int EndIndex,
         string ReferencedPath,
         string? DefaultValue);
+
+    private readonly record struct CachedConfigurationEntry(
+        string Path,
+        string? Value);
 }
