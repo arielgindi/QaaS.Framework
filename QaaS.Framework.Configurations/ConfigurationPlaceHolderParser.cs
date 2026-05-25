@@ -7,8 +7,8 @@ namespace QaaS.Framework.Configurations;
 /// </summary>
 public class ConfigurationPlaceholderParser(IConfiguration configuration)
 {
-    private const string Prefix = "${";
-    private const string Suffix = "}";
+    private const string PlaceholderStart = "${";
+    private const string PlaceholderEnd = "}";
     private const string NullSeparator = "??";
     private const char OpenCurlyBracket = '{';
     private const char CloseCurlyBracket = '}';
@@ -33,7 +33,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             foreach (var pathContainingPlaceholder in _pathsContainingPlaceholders.ToArray())
             {
                 var currentValueAtPath = configuration[pathContainingPlaceholder];
-                if (currentValueAtPath is not null && currentValueAtPath.Contains(Prefix, StringComparison.Ordinal))
+                if (currentValueAtPath is not null && currentValueAtPath.Contains(PlaceholderStart, StringComparison.Ordinal))
                     ResolvePlaceholderValue(pathContainingPlaceholder);
             }
         } while (_modificationCount != modificationCountAtPassStart);
@@ -52,7 +52,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         {
             if (_existingPaths.Add(configurationEntry.Key))
                 IncrementParentRefcount(configurationEntry.Key);
-            if (configurationEntry.Value is { } entryValue && entryValue.Contains(Prefix, StringComparison.Ordinal))
+            if (configurationEntry.Value is { } entryValue && entryValue.Contains(PlaceholderStart, StringComparison.Ordinal))
                 _pathsContainingPlaceholders.Add(configurationEntry.Key);
         }
     }
@@ -75,17 +75,15 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
         if (currentSection is null || !IsStringLeaf(currentSection)) return currentSection!;
         var lastEnd = 0;
 
-        while (currentSection.Value is not null)
+        while (currentSection.Value is { } sectionValue)
         {
-            var sectionValue = currentSection.Value;
-            var placeholderStartIndex = sectionValue?.IndexOf(Prefix, lastEnd, StringComparison.Ordinal) ?? -1;
-            if (placeholderStartIndex is -1) break; // If no Prefix for a placeholder was found, break.
+            var placeholderStartIndex = sectionValue.IndexOf(PlaceholderStart, lastEnd, StringComparison.Ordinal);
+            if (placeholderStartIndex is -1) break;
 
-            var end = FindClosingBracket(sectionValue!, placeholderStartIndex + 2);
-            if (end == -1) break; // Continues only if the section has a string value containing placeholder.
+            var end = FindClosingBracket(sectionValue, placeholderStartIndex + 2);
+            if (end == -1) break;
 
-            // Finds the placeholder value path and default value.
-            var placeholder = sectionValue!.Substring(placeholderStartIndex + 2, end - placeholderStartIndex - 2);
+            var placeholder = sectionValue.Substring(placeholderStartIndex + 2, end - placeholderStartIndex - 2);
             var placeholderParts = placeholder.Split(NullSeparator, 2);
             var referencedPath = placeholderParts[0].Trim();
             var defaultValue = placeholderParts.Length > 1 ? placeholderParts[1].Trim() : null;
@@ -113,8 +111,8 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
                 try
                 {
                     var resolvedSection = ResolvePlaceholderValue(referencedPath);
-                    var hasLeadingTrailingCharsFromPlaceholder = !(sectionValue.StartsWith(Prefix) &&
-                                                                   sectionValue.EndsWith(Suffix) && sectionValue.Skip(end)
+                    var hasLeadingTrailingCharsFromPlaceholder = !(sectionValue.StartsWith(PlaceholderStart) &&
+                                                                   sectionValue.EndsWith(PlaceholderEnd) && sectionValue.Skip(end)
                                                                        .Any(chr => chr == CloseCurlyBracket));
 
                     if (!IsStringLeaf(resolvedSection) && hasLeadingTrailingCharsFromPlaceholder)
@@ -175,7 +173,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
             .ToList();
         var newConfigKeys = configKeys
             .Where(kvp => IsPathOrDescendant(kvp.Key, sourcePath))
-            .Select(kvp => new KeyValuePair<string, string?>(ReplacePathPrefix(kvp.Key, sourcePath, destinationPath), kvp.Value))
+            .Select(kvp => new KeyValuePair<string, string?>(ReplacePathPlaceholderStart(kvp.Key, sourcePath, destinationPath), kvp.Value))
             .ToList();
         configKeys = configKeys.Concat(newConfigKeys).ToList();
         configuration = new ConfigurationBuilder().AddInMemoryCollection(configKeys).Build();
@@ -202,7 +200,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
 
     private void RefreshPlaceholderMembership(string path, string? value)
     {
-        if (value is not null && value.Contains(Prefix, StringComparison.Ordinal))
+        if (value is not null && value.Contains(PlaceholderStart, StringComparison.Ordinal))
             _pathsContainingPlaceholders.Add(path);
         else
             _pathsContainingPlaceholders.Remove(path);
@@ -240,7 +238,7 @@ public class ConfigurationPlaceholderParser(IConfiguration configuration)
                candidatePath.StartsWith(path + ConfigurationConstants.PathSeparator, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string ReplacePathPrefix(string path, string sourcePath, string destinationPath)
+    private static string ReplacePathPlaceholderStart(string path, string sourcePath, string destinationPath)
     {
         return path.Length == sourcePath.Length ? destinationPath : destinationPath + path[sourcePath.Length..];
     }
