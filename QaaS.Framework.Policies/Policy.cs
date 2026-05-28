@@ -5,7 +5,11 @@ namespace QaaS.Framework.Policies;
 public abstract class Policy
 {
     protected Policy? Next;
-    
+
+    // Concrete policies hold mutable state (CountPolicy._counter, LoadBalancePolicy._intervalTimer)
+    // that the chain runs from every Parallel.ForEach worker — serialize per instance.
+    private readonly Lock _chainLock = new();
+
     // <summary>
     // the place the policy should be in the chain.
     // a lower index means closer to the start.
@@ -51,17 +55,20 @@ public abstract class Policy
 
     public bool RunChain()
     {
-        try {
-            RunThis();
-        }
-        catch (StopActionException) {
-            // log exception
-            return false;
-        }
+        lock (_chainLock)
+        {
+            try {
+                RunThis();
+            }
+            catch (StopActionException) {
+                // log exception
+                return false;
+            }
 
-        if (Next == null)
-            return true;
-        return Next.RunChain();
+            if (Next == null)
+                return true;
+            return Next.RunChain();
+        }
     }
 
     protected abstract void RunThis();
